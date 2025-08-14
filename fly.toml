@@ -1,0 +1,4 @@
+app = "matchmaker-staging-bot"
+
+[build]
+  dockerfile = "Dockerfile"
