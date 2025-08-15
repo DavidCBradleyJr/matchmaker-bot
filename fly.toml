@@ -1,5 +1,5 @@
-app = 'matchmaker-bot'
-primary_region = 'iad'
+app = "matchmaker-staging-bot"
+primary_region = "iad"
 
 [build]
   dockerfile = "Dockerfile"
@@ -10,9 +10,9 @@ primary_region = 'iad'
   auto_start_machines = true
   auto_stop_machines = false
   min_machines_running = 1
-  processes = ['app']
+  processes = ["app"]
 
 [[vm]]
-  memory = '1gb'
-  cpu_kind = 'shared'
+  memory = "1gb"
+  cpu_kind = "shared"
   cpus = 1
