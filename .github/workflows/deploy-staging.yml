@@ -1,6 +1,4 @@
-# .github/workflows/deploy-staging.yml
 name: Deploy Staging to Fly.io
-
 on:
   push:
     branches: [ main ]
@@ -10,20 +8,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
 
-      - name: Setup Flyctl
-        uses: superfly/flyctl-actions/setup-flyctl@master
-
-      # OPTIONAL: set/update secrets on the app (only if you haven't already via CLI)
-      # - name: Set Fly app secrets (DISCORD_TOKEN)
-      #   env:
-      #     FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-      #     DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
-      #   run: |
-      #     flyctl secrets set DISCORD_TOKEN="$DISCORD_TOKEN" ENVIRONMENT=staging -a matchmaker-staging-bot
-
-      - name: Deploy using local Docker on runner (no remote builder)
+      # Build with the runner's Docker and deploy (avoids remote builder/Depot)
+      - name: Deploy (local build on runner)
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-        run: |
-          flyctl deploy -a matchmaker-staging-bot --local-only
+        run: flyctl deploy -a matchmaker-staging-bot --local-only
