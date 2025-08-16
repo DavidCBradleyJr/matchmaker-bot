@@ -1,0 +1,58 @@
+name: Deploy Web (staging & prod)
+
+on:
+  push:
+    branches: [ develop, main ]
+    paths:
+      - "web/**"
+      - ".github/workflows/deploy-web.yml"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      # --- STAGING on develop ---
+      - name: Deploy STAGING (develop)
+        if: github.ref_name == 'develop'
+        working-directory: web
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          NEXT_PUBLIC_ENV: ${{ secrets.STAGING_NEXT_PUBLIC_ENV }}
+          NEXT_PUBLIC_DISCORD_CLIENT_ID: ${{ secrets.STAGING_NEXT_PUBLIC_DISCORD_CLIENT_ID }}
+          NEXT_PUBLIC_DISCORD_SCOPES: ${{ secrets.STAGING_NEXT_PUBLIC_DISCORD_SCOPES }}
+          NEXT_PUBLIC_DISCORD_PERMISSIONS: ${{ secrets.STAGING_NEXT_PUBLIC_DISCORD_PERMISSIONS }}
+        run: |
+          # seed/update app secrets on Fly from GH Secrets
+          flyctl secrets set \
+            NEXT_PUBLIC_ENV="$NEXT_PUBLIC_ENV" \
+            NEXT_PUBLIC_DISCORD_CLIENT_ID="$NEXT_PUBLIC_DISCORD_CLIENT_ID" \
+            NEXT_PUBLIC_DISCORD_SCOPES="$NEXT_PUBLIC_DISCORD_SCOPES" \
+            NEXT_PUBLIC_DISCORD_PERMISSIONS="$NEXT_PUBLIC_DISCORD_PERMISSIONS" \
+            --config fly.staging.toml
+          # deploy
+          flyctl deploy --config fly.staging.toml --remote-only
+
+      # --- PROD on main ---
+      - name: Deploy PROD (main)
+        if: github.ref_name == 'main'
+        working-directory: web
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          NEXT_PUBLIC_ENV: ${{ secrets.PROD_NEXT_PUBLIC_ENV }}
+          NEXT_PUBLIC_DISCORD_CLIENT_ID: ${{ secrets.PROD_NEXT_PUBLIC_DISCORD_CLIENT_ID }}
+          NEXT_PUBLIC_DISCORD_SCOPES: ${{ secrets.PROD_NEXT_PUBLIC_DISCORD_SCOPES }}
+          NEXT_PUBLIC_DISCORD_PERMISSIONS: ${{ secrets.PROD_NEXT_PUBLIC_DISCORD_PERMISSIONS }}
+        run: |
+          flyctl secrets set \
+            NEXT_PUBLIC_ENV="$NEXT_PUBLIC_ENV" \
+            NEXT_PUBLIC_DISCORD_CLIENT_ID="$NEXT_PUBLIC_DISCORD_CLIENT_ID" \
+            NEXT_PUBLIC_DISCORD_SCOPES="$NEXT_PUBLIC_DISCORD_SCOPES" \
+            NEXT_PUBLIC_DISCORD_PERMISSIONS="$NEXT_PUBLIC_DISCORD_PERMISSIONS" \
+            --config fly.prod.toml
+          flyctl deploy --config fly.prod.toml --remote-only
