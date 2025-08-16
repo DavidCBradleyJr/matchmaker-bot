@@ -1,6 +1,9 @@
 import CTAInvite from "@/components/CTAInvite";
 import FeatureCard from "@/components/FeatureCard";
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 export default function Home() {
   const name = process.env.NEXT_PUBLIC_SITE_NAME || "Matchmaker Bot";
   const tagline = process.env.NEXT_PUBLIC_TAGLINE || "Find teammates. Fast.";
