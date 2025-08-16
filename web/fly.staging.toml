@@ -1,6 +1,9 @@
 app = "matchmaker-site-staging"
 primary_region = "iad"
-[build] dockerfile = "Dockerfile"
+
+[build]
+  dockerfile = "Dockerfile"
+
 [http_service]
   internal_port = 3000
   force_https = true
