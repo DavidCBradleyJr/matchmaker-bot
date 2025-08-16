@@ -42,3 +42,18 @@ async def remove_allowed_guilds(environment: str, guild_ids: Iterable[int]) -> i
         result = await conn.execute("DELETE FROM allowed_guilds WHERE environment = $1 AND id = ANY($2::BIGINT[])", environment, list(map(int, guild_ids)))
         # result like "DELETE 2" → extract affected rows
         return int(result.split()[-1])
+
+
+_pool = None
+
+def get_pool():
+    if _pool is None:
+        raise RuntimeError("DB pool not initialized")
+    return _pool
+
+async def init_pool(dsn: str):
+    global _pool
+    import asyncpg
+    _pool = await asyncpg.create_pool(dsn, min_size=1, max_size=4)
+    async with _pool.acquire() as conn:
+        await conn.execute("SELECT 1")
