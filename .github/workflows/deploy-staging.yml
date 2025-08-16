@@ -1,20 +1,27 @@
 name: Deploy Staging
-
 on:
   push:
     branches: [ develop ]
+  workflow_dispatch: {}
+
+concurrency:
+  group: staging-deploy
+  cancel-in-progress: true
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: https://matchmaker-staging-bot.fly.dev/health
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup Flyctl
         uses: superfly/flyctl-actions/setup-flyctl@master
 
-      # Ensure app secrets exist (safe to run every time)
-      - name: Set Fly app secrets (staging)
+      # ensure app secrets exist (safe to re-run)
+      - name: Set Fly app secrets
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
           DISCORD_TOKEN: ${{ secrets.STAGING_DISCORD_TOKEN }}
@@ -26,10 +33,9 @@ jobs:
             PUBLIC_INVITE_URL="${INVITE_URL:-}" \
             -a matchmaker-staging-bot
 
-      # Build on the runner (no Depot/remote builder) and deploy using staging config
-      - name: Deploy (staging)
+      # build with runner's Docker (no Depot) and deploy using staging toml
+      - name: Deploy
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
-          flyctl deploy --local-only \
-            -c fly.staging.toml
+          flyctl deploy --local-only -c fly.staging.toml
