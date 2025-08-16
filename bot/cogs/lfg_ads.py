@@ -62,7 +62,7 @@ class LfgAds(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    lfg = app_commands.Group(name="lfg", description="Create and manage LFG ads")
+    lfg = app_commands.Group(name="lfg_ad", description="Create and manage LFG ads")
 
     @lfg.command(name="post", description="Post an LFG ad")
     @app_commands.describe(
