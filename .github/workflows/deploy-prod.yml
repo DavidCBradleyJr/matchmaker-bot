@@ -1,4 +1,5 @@
 name: Deploy Production
+
 on:
   push:
     branches: [ main ]
@@ -6,34 +7,40 @@ on:
 
 concurrency:
   group: prod-deploy
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
-  deploy:
+  prepare:
     runs-on: ubuntu-latest
-    environment:
-      name: production
-      url: https://matchmaker-prod-bot.fly.dev/health
-    # require an approval before the job runs (set approvers in Environments)
     steps:
       - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
 
-      - name: Setup Flyctl
-        uses: superfly/flyctl-actions/setup-flyctl@master
-
-      - name: Set Fly app secrets
+      - name: Set Fly secrets (production)
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
           DISCORD_TOKEN: ${{ secrets.PROD_DISCORD_TOKEN }}
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
           INVITE_URL: ${{ secrets.PROD_PUBLIC_INVITE_URL }}
         run: |
+          # Set all secrets needed by the app; triggers a rolling restart
           flyctl secrets set \
             DISCORD_TOKEN="$DISCORD_TOKEN" \
+            DATABASE_URL="$DATABASE_URL" \
             ENVIRONMENT=production \
             PUBLIC_INVITE_URL="${INVITE_URL:-}" \
             -a matchmaker-prod-bot
 
-      - name: Deploy
+  deploy:
+    needs: prepare
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://matchmaker-prod-bot.fly.dev/health
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Deploy to Fly (production)
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
