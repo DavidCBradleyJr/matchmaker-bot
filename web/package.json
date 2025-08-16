@@ -1,6 +1,7 @@
 {
   "name": "matchmaker-site",
   "private": true,
+  "packageManager": "npm@10.8.1",
   "scripts": {
     "dev": "next dev -p 3000",
     "build": "next build",
