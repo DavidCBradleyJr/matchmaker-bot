@@ -1,3 +1,4 @@
+# bot/cogs/lfg.py
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -12,9 +13,8 @@ class LFG(commands.Cog):
 
     @app_commands.command(
         name="lfg_basic",
-        description="Post a basic LFG message (MVP stub).",
+        description="Post a basic LFG message.",
     )
-
     @app_commands.describe(game="Game name", description="What do you need?")
     async def lfg_basic(
         self,
