@@ -10,7 +10,7 @@ logger = logging.getLogger("bot")
 
 INTENTS = discord.Intents.default()
 INTENTS.guilds = True
-INTENTS.members = False  # keep off unless you really need the privileged Members intent
+INTENTS.members = False
 
 class Bot(commands.Bot):
     def __init__(self):
@@ -77,8 +77,23 @@ async def on_guild_join(guild: discord.Guild):
             except Exception:
                 logger.exception("Failed to leave %s (%s)", guild.name, guild.id)
 
+async def run_health_server():
+    from aiohttp import web
+
+    async def health(_req):
+        return web.Response(text="ok", status=200)
+
+    app = web.Application()
+    app.add_routes([web.get("/health", health)])
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host="0.0.0.0", port=8080)
+    await site.start()
+
 async def main():
     await asyncio.gather(
+        run_health_server(),                # <— added
         bot.start(config.DISCORD_TOKEN),
     )
 
