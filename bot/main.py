@@ -1,62 +1,74 @@
-# bot/main.py
 import asyncio
 import logging
-import os
-
 import discord
 from discord.ext import commands
-from aiohttp import web
-
 from . import config
-from .health import make_app
+from .db import init_pool, get_allowed_guilds
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("bot")
 
-INTENTS = discord.Intents.none()  # slash-commands only for MVP
-SYNC_GUILDS = []  # put test guild IDs here for faster command sync (optional)
+INTENTS = discord.Intents.default()
+INTENTS.guilds = True
+INTENTS.members = True
+# message_content optional; we’re slash-first
+# INTENTS.message_content = True
 
 class Bot(commands.Bot):
     def __init__(self):
-        super().__init__(
-            command_prefix="!",
-            intents=INTENTS,
-            application_id=None,  # discord.py infers from token
-        )
+        super().__init__(command_prefix="!", intents=INTENTS, application_id=None)
 
     async def setup_hook(self):
-        # Load cogs/extensions
+        # DB pool (if configured)
+        if config.DATABASE_URL:
+            await init_pool(config.DATABASE_URL)
+
+        # Load cogs
         await self.load_extension("bot.cogs.lfg")
+        await self.load_extension("bot.cogs.allowlist")  # new
 
         # Sync application commands
-        if SYNC_GUILDS:
-            # Faster dev sync to a specific guild
-            for gid in SYNC_GUILDS:
-                await self.tree.sync(guild=discord.Object(id=gid))
-        else:
-            # Global sync (takes a minute the very first time)
-            await self.tree.sync()
+        await self.tree.sync()
 
-async def start_health_server():
-    app = make_app()
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
-    await site.start()
-    logging.getLogger("health").info("health server started on /health")
+bot = Bot()
+
+async def allowed_guilds() -> set[int]:
+    if config.ENVIRONMENT == "staging" and config.DATABASE_URL:
+        return await get_allowed_guilds("staging")
+    return config.STAGING_ALLOWED_GUILDS
+
+@bot.event
+async def on_ready():
+    logger.info("Logged in as %s (%s)", bot.user, bot.user.id if bot.user else "?")
+    # Presence
+    status_text = config.STAGING_STATUS if config.ENVIRONMENT == "staging" else config.PROD_STATUS
+    await bot.change_presence(activity=discord.Game(name=status_text))
+
+    # Staging lock
+    if config.ENVIRONMENT == "staging":
+        allowed = await allowed_guilds()
+        unauthorized = [g for g in bot.guilds if allowed and g.id not in allowed]
+        for g in unauthorized:
+            logger.warning("Leaving unauthorized guild: %s (%s)", g.name, g.id)
+            try:
+                await g.leave()
+            except Exception:
+                logger.exception("Failed to leave %s (%s)", g.name, g.id)
+
+@bot.event
+async def on_guild_join(guild: discord.Guild):
+    if config.ENVIRONMENT == "staging":
+        allowed = await allowed_guilds()
+        if allowed and guild.id not in allowed:
+            logger.warning("Invited to unauthorized guild: %s (%s). Leaving.", guild.name, guild.id)
+            try:
+                await guild.leave()
+            except Exception:
+                logger.exception("Failed to leave %s (%s)", guild.name, guild.id)
 
 async def main():
-    token = config.DISCORD_TOKEN
-    if not token or len(token) < 50:
-        raise RuntimeError("DISCORD_TOKEN is missing or malformed.")
-
-    bot = Bot()
-    # run bot and health server together
     await asyncio.gather(
-        start_health_server(),
-        bot.start(token),
+        bot.start(config.DISCORD_TOKEN),
     )
 
 if __name__ == "__main__":
