@@ -14,27 +14,33 @@ jobs:
     environment:
       name: staging
       url: https://matchmaker-staging-bot.fly.dev/health
+
     steps:
       - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
 
-      - name: Setup Flyctl
-        uses: superfly/flyctl-actions/setup-flyctl@master
-
-      # ensure app secrets exist (safe to re-run)
-      - name: Set Fly app secrets
+      - name: Set core staging secrets
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
           DISCORD_TOKEN: ${{ secrets.STAGING_DISCORD_TOKEN }}
           INVITE_URL: ${{ secrets.STAGING_PUBLIC_INVITE_URL }}
         run: |
           flyctl secrets set \
-            DISCORD_TOKEN="$DISCORD_TOKEN" \
+            DISCORD_TOKEN="${DISCORD_TOKEN}" \
             ENVIRONMENT=staging \
             PUBLIC_INVITE_URL="${INVITE_URL:-}" \
             -a matchmaker-staging-bot
 
-      # build with runner's Docker (no Depot) and deploy using staging toml
-      - name: Deploy
+      # ✅ Neon DB URL → Fly secret
+      - name: Set DB secret (staging)
+        if: ${{ secrets.STAGING_DATABASE_URL != '' }}
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+        run: |
+          flyctl secrets set DATABASE_URL="${DATABASE_URL}" -a matchmaker-staging-bot
+
+      - name: Deploy to Fly (staging)
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
