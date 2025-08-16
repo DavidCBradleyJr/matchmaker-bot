@@ -1,3 +1,4 @@
+# bot/cogs/lfg.py
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -10,9 +11,12 @@ class LFG(commands.Cog):
     async def ping(self, interaction: discord.Interaction):
         await interaction.response.send_message("Pong!", ephemeral=True)
 
-    @app_commands.command(name="lfg", description="Post a basic LFG message (MVP stub).")
+    @app_commands.command(
+        name="lfg_basic",
+        description="Post a basic LFG message.",
+    )
     @app_commands.describe(game="Game name", description="What do you need?")
-    async def lfg(
+    async def lfg_basic(
         self,
         interaction: discord.Interaction,
         game: str,
