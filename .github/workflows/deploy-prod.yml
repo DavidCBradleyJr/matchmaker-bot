@@ -1,19 +1,27 @@
 name: Deploy Production
-
 on:
   push:
     branches: [ main ]
+  workflow_dispatch: {}
+
+concurrency:
+  group: prod-deploy
+  cancel-in-progress: false
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://matchmaker-prod-bot.fly.dev/health
+    # require an approval before the job runs (set approvers in Environments)
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup Flyctl
         uses: superfly/flyctl-actions/setup-flyctl@master
 
-      - name: Set Fly app secrets (prod)
+      - name: Set Fly app secrets
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
           DISCORD_TOKEN: ${{ secrets.PROD_DISCORD_TOKEN }}
@@ -25,9 +33,8 @@ jobs:
             PUBLIC_INVITE_URL="${INVITE_URL:-}" \
             -a matchmaker-prod-bot
 
-      - name: Deploy (prod)
+      - name: Deploy
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
-          flyctl deploy --local-only \
-            -c fly.prod.toml
+          flyctl deploy --local-only -c fly.prod.toml
