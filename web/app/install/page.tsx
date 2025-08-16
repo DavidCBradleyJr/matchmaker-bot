@@ -1,5 +1,8 @@
 import CTAInvite from "@/components/CTAInvite";
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 export default function Install() {
   return (
     <div className="prose prose-invert max-w-none">
