@@ -1,57 +1,86 @@
-"use client";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 import { MessageSquare, Users } from "lucide-react";
 
 export default function ContactPage() {
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-900 via-black to-gray-900 text-white py-20 px-6">
-      <div className="max-w-5xl mx-auto space-y-16">
-        {/* Header */}
-        <div className="text-center">
-          <h1 className="text-5xl font-extrabold mb-4 bg-gradient-to-r from-indigo-400 to-purple-500 bg-clip-text text-transparent">
-            Contact Us
-          </h1>
-          <p className="text-gray-400 text-lg max-w-2xl mx-auto">
-            Need help, want to share feedback, or just want to chat?
-            You can reach us directly on Discord.
-          </p>
-        </div>
+    <div className="relative space-y-10">
+      {/* background accent (match other pages) */}
+      <div className="pointer-events-none absolute inset-x-0 -top-24 -z-10 h-64 bg-gradient-to-b from-indigo-500/25 via-indigo-500/10 to-transparent blur-3xl" />
 
-        {/* Contact Options */}
-        <div className="grid gap-8 md:grid-cols-2">
-          {/* DM Developer */}
-          <div className="bg-gray-800/50 backdrop-blur-md rounded-2xl shadow-lg p-10 text-center hover:scale-105 transform transition">
-            <MessageSquare className="mx-auto h-14 w-14 text-purple-400 mb-6" />
-            <h2 className="text-2xl font-bold mb-3">Message DevDeej</h2>
-            <p className="text-gray-400 text-sm mb-6">
-              Have a direct question? DM the developer instantly in Discord.
-            </p>
-            <a
-              href="discord://-/users/123456789012345678"
-              className="inline-block bg-purple-600 hover:bg-purple-700 text-white font-semibold py-3 px-6 rounded-xl transition"
-            >
-              Open in Discord App
-            </a>
-          </div>
+      {/* hero */}
+      <section className="text-center">
+        <span className="inline-flex items-center gap-2 rounded-md border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/70">
+          Support • Discord-first
+        </span>
+        <h1 className="mt-6 text-4xl font-extrabold tracking-tight md:text-6xl">
+          Contact
+        </h1>
+        <p className="mx-auto mt-3 max-w-2xl text-white/75">
+          Need help, want to share feedback, or just want to chat? The fastest way to reach us is on Discord.
+        </p>
+      </section>
 
-          {/* Join Server */}
-          <div className="bg-gray-800/50 backdrop-blur-md rounded-2xl shadow-lg p-10 text-center hover:scale-105 transform transition">
-            <Users className="mx-auto h-14 w-14 text-green-400 mb-6" />
-            <h2 className="text-2xl font-bold mb-3">Join Our Server</h2>
-            <p className="text-gray-400 text-sm mb-6">
-              Connect with the community, share feedback, and get updates.
-            </p>
-            <a
-              href="https://discord.gg/7Cersw2kqv"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-block bg-green-600 hover:bg-green-700 text-white font-semibold py-3 px-6 rounded-xl transition"
-            >
-              Join Server
-            </a>
-          </div>
-        </div>
+      {/* cards */}
+      <section className="grid gap-6 md:grid-cols-2">
+        <ContactCard
+          icon={<Users className="h-5 w-5" />}
+          title="Community Support (Discord)"
+          body="Join our server to ask questions, suggest features, and see announcements."
+        >
+          <a
+            href="https://discord.gg/7Cersw2kqv"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center justify-center rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-medium hover:bg-white/10"
+          >
+            Join Server
+          </a>
+        </ContactCard>
+
+        <ContactCard
+          icon={<MessageSquare className="h-5 w-5" />}
+          title="Direct DM Support"
+          body="Prefer a direct chat? DM the bot owner after joining; we’ll get back as soon as we can."
+          foot="Availability may vary by timezone."
+        >
+          <a
+            href="https://discord.gg/7Cersw2kqv"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center justify-center rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-medium hover:bg-white/10"
+          >
+            Open Discord
+          </a>
+        </ContactCard>
+      </section>
+    </div>
+  );
+}
+
+function ContactCard({
+  icon,
+  title,
+  body,
+  foot,
+  children
+}: {
+  icon: React.ReactNode;
+  title: string;
+  body: string;
+  foot?: string;
+  children?: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-2xl border border-white/10 bg-zinc-900/60 p-6 shadow-sm shadow-black/20">
+      <div className="flex items-center gap-2 text-white/80">
+        {icon}
+        <h3 className="text-lg font-semibold">{title}</h3>
       </div>
+      <p className="mt-2 text-white/75">{body}</p>
+      {children ? <div className="mt-4">{children}</div> : null}
+      {foot ? <p className="mt-4 text-xs text-white/50">{foot}</p> : null}
     </div>
   );
 }
