@@ -1,71 +1,69 @@
 "use client";
 
-import { useEffect } from "react";
-import Link from "next/link";
-import { Mail, MessageCircle, Users } from "lucide-react";
+import { Mail, MessageSquare, Users } from "lucide-react";
 
 export default function ContactPage() {
-  // devdeej's Discord user ID — replace with your actual ID
-  const DISCORD_USER_ID = "154593850185351168";
-  const DISCORD_SERVER_URL = "https://discord.gg/7Cersw2kqv";
-
-  const handleDiscordClick = (e: React.MouseEvent<HTMLAnchorElement>) => {
-    e.preventDefault();
-
-    // Attempt to open the Discord app
-    window.location.href = `discord://discord.com/users/${DISCORD_USER_ID}`;
-
-    // Fallback to web after a short delay if the app doesn't open
-    setTimeout(() => {
-      window.location.href = `https://discord.com/users/${DISCORD_USER_ID}`;
-    }, 500);
-  };
-
   return (
-    <div className="min-h-screen bg-gray-950 text-gray-100 py-16 px-6">
-      <div className="max-w-3xl mx-auto text-center">
-        <h1 className="text-4xl font-extrabold mb-6 bg-gradient-to-r from-indigo-400 to-pink-500 text-transparent bg-clip-text">
-          Contact Us
-        </h1>
-        <p className="text-lg text-gray-300 mb-12">
-          Got questions or need help with <strong>Matchmaker Bot</strong>? Reach
-          out to us below.
-        </p>
+    <div className="min-h-screen bg-gradient-to-b from-gray-900 to-black text-white py-16 px-6">
+      <div className="max-w-4xl mx-auto space-y-12">
+        {/* Header */}
+        <div className="text-center">
+          <h1 className="text-5xl font-extrabold mb-4 bg-gradient-to-r from-indigo-400 to-purple-500 bg-clip-text text-transparent">
+            Contact Us
+          </h1>
+          <p className="text-gray-400 text-lg">
+            Got questions, feedback, or need help with Matchmaker Bot? Reach out below.
+          </p>
+        </div>
 
-        <div className="grid gap-6 md:grid-cols-3">
-          {/* Message devdeej */}
-          <a
-            href={`discord://discord.com/users/${DISCORD_USER_ID}`}
-            onClick={handleDiscordClick}
-            className="flex flex-col items-center justify-center rounded-2xl bg-indigo-600 hover:bg-indigo-700 p-6 transition"
-          >
-            <MessageCircle className="w-10 h-10 mb-3" />
-            <h3 className="font-semibold text-lg">Message devdeej</h3>
-            <p className="text-sm text-gray-200 mt-2">DM the developer</p>
-          </a>
-
-          {/* Discord Server */}
-          <Link
-            href={DISCORD_SERVER_URL}
-            target="_blank"
-            className="flex flex-col items-center justify-center rounded-2xl bg-pink-600 hover:bg-pink-700 p-6 transition"
-          >
-            <Users className="w-10 h-10 mb-3" />
-            <h3 className="font-semibold text-lg">Join the Server</h3>
-            <p className="text-sm text-gray-200 mt-2">
-              Get support & connect with others
+        {/* Contact Options */}
+        <div className="grid gap-8 md:grid-cols-3">
+          {/* Email */}
+          <div className="bg-gray-800/50 rounded-2xl shadow-lg p-8 text-center hover:scale-105 transform transition">
+            <Mail className="mx-auto h-12 w-12 text-indigo-400 mb-4" />
+            <h2 className="text-xl font-bold mb-2">Email Us</h2>
+            <p className="text-gray-400 text-sm mb-4">
+              Get support or send feedback directly via email.
             </p>
-          </Link>
+            <a
+              href="mailto:devdeej@example.com"
+              className="inline-block bg-indigo-500 hover:bg-indigo-600 text-white font-semibold py-2 px-4 rounded-lg transition"
+            >
+              Send Email
+            </a>
+          </div>
 
-          {/* Email (optional backup) */}
-          <a
-            href="mailto:support@matchmakerbot.dev"
-            className="flex flex-col items-center justify-center rounded-2xl bg-gray-800 hover:bg-gray-700 p-6 transition"
-          >
-            <Mail className="w-10 h-10 mb-3" />
-            <h3 className="font-semibold text-lg">Email Support</h3>
-            <p className="text-sm text-gray-200 mt-2">support@matchmakerbot.dev</p>
-          </a>
+          {/* DM Developer */}
+          <div className="bg-gray-800/50 rounded-2xl shadow-lg p-8 text-center hover:scale-105 transform transition">
+            <MessageSquare className="mx-auto h-12 w-12 text-purple-400 mb-4" />
+            <h2 className="text-xl font-bold mb-2">Message DevDeej</h2>
+            <p className="text-gray-400 text-sm mb-4">
+              Have a direct question? DM the developer on Discord.
+            </p>
+            <a
+              href="discord://-/users/154593850185351168"
+              className="inline-block bg-purple-500 hover:bg-purple-600 text-white font-semibold py-2 px-4 rounded-lg transition"
+            >
+              Open in Discord
+            </a>
+          </div>
+
+          {/* Join Server */}
+          <div className="bg-gray-800/50 rounded-2xl shadow-lg p-8 text-center hover:scale-105 transform transition">
+            <Users className="mx-auto h-12 w-12 text-green-400 mb-4" />
+            <h2 className="text-xl font-bold mb-2">Join Our Server</h2>
+            <p className="text-gray-400 text-sm mb-4">
+              Chat with the community, share feedback, and stay updated.
+            </p>
+            <a
+              href="https://discord.gg/7Cersw2kqv"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-block bg-green-500 hover:bg-green-600 text-white font-semibold py-2 px-4 rounded-lg transition"
+            >
+              Join Server
+            </a>
+          </div>
         </div>
       </div>
     </div>
