@@ -1,332 +1,188 @@
-# bot/cogs/lfg_ads.py
+# bot/cogs/ad_interactions.py
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Optional
 
 import asyncpg
 import discord
-from discord import app_commands
 from discord.ext import commands
 
 from ..db import get_pool
 
-log = logging.getLogger("lfg_ads")
+log = logging.getLogger("ad_interactions")
 
-# ---------- config / theming ----------
-STATUS_DEFAULT = "open"
-
-SITE_URL = "https://matchmaker-site.fly.dev/"
-
-PLATFORM_COLORS = {
-    "pc": 0x5865F2,        # Discord blurple
-    "xbox": 0x107C10,
-    "playstation": 0x003791,
-    "ps": 0x003791,
-    "switch": 0xE60012,
-    "mobile": 0x00A3FF,
-    "other": 0x2B2D31,
-}
-
-PLATFORM_EMOJIS = {
-    "pc": "🖥️",
-    "xbox": "🟩",
-    "playstation": "🟦",
-    "ps": "🟦",
-    "switch": "🔴",
-    "mobile": "📱",
-    "other": "🎮",
-}
+CONNECT_PREFIX = "ad_connect:"
+REPORT_PREFIX = "ad_report:"
 
 
-# ---------- helpers ----------
+# ---------- DB helpers ----------
 
-def _platform_color(platform: Optional[str]) -> int:
-    if not platform:
-        return PLATFORM_COLORS["other"]
-    return PLATFORM_COLORS.get(platform.lower(), PLATFORM_COLORS["other"])
-
-def _platform_emoji(platform: Optional[str]) -> str:
-    if not platform:
-        return PLATFORM_EMOJIS["other"]
-    return PLATFORM_EMOJIS.get(platform.lower(), PLATFORM_EMOJIS["other"])
-
-def _safe(s: Optional[str], dash: str = "—") -> str:
-    s = (s or "").strip()
-    return s if s else dash
-
-def _trim_notes(notes: Optional[str], limit: int = 300) -> Optional[str]:
-    if not notes:
-        return None
-    n = notes.strip()
-    if not n:
-        return None
-    if len(n) > limit:
-        return n[: limit - 1] + "…"
-    return n
+async def _get_ad_author(conn: asyncpg.Connection, ad_id: int) -> Optional[int]:
+    row = await conn.fetchrow("SELECT author_id FROM lfg_ads WHERE id = $1", ad_id)
+    return int(row["author_id"]) if row else None
 
 
-@dataclass
-class CreatedAd:
-    id: int
-    guild_id: int
-    channel_id: int
-    message_id: int
-
-
-# ---------- embed & view ----------
-
-def build_ad_embed(
-    *,
-    author: discord.abc.User,
-    game: str,
-    platform: Optional[str],
-    region: Optional[str],
-    notes: Optional[str],
-    guild_icon_url: Optional[str],
-    site_url: str = SITE_URL,
-) -> discord.Embed:
-    color = _platform_color(platform)
-    pfx = _platform_emoji(platform)
-    title = f"{pfx} {_safe(game)} • {_safe((platform or '').title(), dash='—')}"
-
-    # Keep subtle credit inside description so it stays clickable
-    desc = "*Powered by [Matchmaker](" + site_url + ")*"
-
-    embed = discord.Embed(
-        title=title,
-        description=desc,
-        color=color,
-        timestamp=datetime.now(timezone.utc),
-    )
-
-    avatar = getattr(author, "display_avatar", None)
-    if avatar:
-        embed.set_author(
-            name=f"{author.display_name} is looking for a squad",
-            icon_url=author.display_avatar.url,
-        )
-    else:
-        embed.set_author(name=f"{author.display_name} is looking for a squad")
-
-    embed.add_field(name="Region", value=_safe(region), inline=True)
-
-    trimmed = _trim_notes(notes)
-    if trimmed:
-        embed.add_field(name="Notes", value=trimmed, inline=False)
-
-    footer_text = "Matchmaker • Find teammates fast"
-    if guild_icon_url:
-        embed.set_footer(text=footer_text, icon_url=guild_icon_url)
-    else:
-        embed.set_footer(text=footer_text)
-
-    return embed
-
-
-class AdActionView(discord.ui.View):
-    def __init__(self, *, ad_id: int, site_url: str = SITE_URL, timeout: Optional[float] = 1800):
-        super().__init__(timeout=timeout)
-        self.ad_id = ad_id
-        self.site_url = site_url
-
-        # Primary connect
-        self.add_item(discord.ui.Button(
-            style=discord.ButtonStyle.primary,
-            label="I’m interested",
-            custom_id=f"ad_connect:{ad_id}",
-            emoji="🤝",
-        ))
-
-        # View on web (optional)
-        self.add_item(discord.ui.Button(
-            style=discord.ButtonStyle.link,
-            label="View on Web",
-            url=f"{self.site_url}/ads/{ad_id}",
-        ))
-
-        # Report (optional)
-        self.add_item(discord.ui.Button(
-            style=discord.ButtonStyle.secondary,
-            label="Report",
-            custom_id=f"ad_report:{ad_id}",
-            emoji="🚩",
-        ))
-
-
-# ---------- DB helpers (your schema) ----------
-
-async def _fetch_lfg_channel_id(conn: asyncpg.Connection, guild_id: int) -> Optional[int]:
+async def _get_any_post_location(conn: asyncpg.Connection, ad_id: int) -> Optional[tuple[int, int, int]]:
+    """
+    Return (guild_id, channel_id, message_id) for one post of this ad, if exists.
+    """
     row = await conn.fetchrow(
-        "SELECT lfg_channel_id FROM guild_settings WHERE guild_id = $1",
-        guild_id,
+        "SELECT guild_id, channel_id, message_id FROM lfg_posts WHERE ad_id = $1 LIMIT 1",
+        ad_id,
     )
-    return int(row["lfg_channel_id"]) if row and row["lfg_channel_id"] else None
-
-async def _insert_lfg_ad(
-    conn: asyncpg.Connection,
-    *,
-    author_id: int,
-    author_name: Optional[str],
-    game: str,
-    platform: Optional[str],
-    region: Optional[str],
-    notes: Optional[str],
-    status: str,
-) -> int:
-    return await conn.fetchval(
-        """
-        INSERT INTO lfg_ads (author_id, author_name, game, platform, region, notes, status)
-        VALUES ($1, $2, $3, $4, $5, $6, $7::ad_status)
-        RETURNING id
-        """,
-        author_id, author_name, game, platform, region, notes, status,
-    )
-
-async def _insert_lfg_post(
-    conn: asyncpg.Connection,
-    *,
-    ad_id: int,
-    guild_id: int,
-    channel_id: int,
-    message_id: int,
-) -> None:
-    await conn.execute(
-        """
-        INSERT INTO lfg_posts (ad_id, guild_id, channel_id, message_id)
-        VALUES ($1, $2, $3, $4)
-        """,
-        ad_id, guild_id, channel_id, message_id,
-    )
+    if not row:
+        return None
+    return int(row["guild_id"]), int(row["channel_id"]), int(row["message_id"])
 
 
-# ---------- Cog ----------
+# ---------- Modal for reports ----------
 
-class LFGAds(commands.Cog):
-    """Create and broadcast clean, branded LFG posts with action buttons."""
+class ReportModal(discord.ui.Modal, title="Report Ad"):
+    def __init__(self, ad_id: int):
+        super().__init__(timeout=180)
+        self.ad_id = ad_id
+        # discord.py 2.4 TextInput
+        self.reason = discord.ui.TextInput(
+            label="What’s the issue?",
+            placeholder="Spam, scam, harassment, wrong channel, etc.",
+            required=True,
+            max_length=500,
+            style=discord.TextStyle.paragraph,
+        )
+        self.add_item(self.reason)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        pool = get_pool()
+        # Log the report with as much context as we can gather
+        try:
+            async with pool.acquire() as conn:
+                author_id = await _get_ad_author(conn, self.ad_id)
+                location = await _get_any_post_location(conn, self.ad_id)
+        except Exception as e:
+            log.exception("Report lookup failed for ad %s: %s", self.ad_id, e)
+            author_id = None
+            location = None
+
+        log.info(
+            "REPORT ad_id=%s by user_id=%s reason=%r ad_author=%s location=%s",
+            self.ad_id,
+            interaction.user.id,
+            str(self.reason.value),
+            author_id,
+            location,
+        )
+
+        # Optional: DM to moderators or post to a mod channel.
+        # If you have a configured mod channel per guild, you can look it up here and forward the report.
+
+        await interaction.response.send_message(
+            "Thanks — your report was received. Our moderators will review it.",
+            ephemeral=True,
+        )
+
+
+# ---------- Cog that handles all component interactions ----------
+
+class AdInteractions(commands.Cog):
+    """Handles button interactions for LFG ads (connect & report)."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    group = app_commands.Group(name="lfg", description="Find teammates fast")
+    @commands.Cog.listener("on_interaction")
+    async def handle_component_clicks(self, interaction: discord.Interaction):
+        # We only care about component interactions (buttons).
+        if interaction.type is not discord.InteractionType.component:
+            return
 
-    @group.command(name="post", description="Post an LFG ad to your server’s LFG channel.")
-    @app_commands.describe(
-        game="What game are you playing?",
-        platform="PC, Xbox, PlayStation, Switch, Mobile, etc. (optional)",
-        region="NA/EU/Asia or a timezone/region (optional)",
-        notes="Anything else teammates should know (optional)",
-    )
-    async def post(
-        self,
-        interaction: discord.Interaction,
-        game: str,
-        platform: Optional[str] = None,
-        region: Optional[str] = None,
-        notes: Optional[str] = None,
-    ):
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        custom_id = (interaction.data or {}).get("custom_id")  # type: ignore[assignment]
+        if not custom_id:
+            return
 
-        if not interaction.guild:
-            return await interaction.followup.send("This command must be used in a server.", ephemeral=True)
+        if custom_id.startswith(CONNECT_PREFIX):
+            await self._handle_connect(interaction, custom_id)
+        elif custom_id.startswith(REPORT_PREFIX):
+            await self._handle_report(interaction, custom_id)
+
+    async def _handle_connect(self, interaction: discord.Interaction, custom_id: str):
+        # Parse ad_id
+        try:
+            ad_id = int(custom_id.split(":", 1)[1])
+        except Exception:
+            return await interaction.response.send_message("Invalid ad id.", ephemeral=True)
 
         pool = get_pool()
 
-        # Look up the broadcast channel for this guild
+        # Lookup ad author
         try:
             async with pool.acquire() as conn:
-                lfg_channel_id = await _fetch_lfg_channel_id(conn, interaction.guild.id)
+                author_id = await _get_ad_author(conn, ad_id)
+                post_loc = await _get_any_post_location(conn, ad_id)
         except Exception as e:
-            log.exception("Failed to fetch LFG channel: %s", e)
-            return await interaction.followup.send("Couldn’t find the LFG channel for this server.", ephemeral=True)
+            log.exception("DB error resolving ad %s: %s", ad_id, e)
+            return await interaction.response.send_message("Couldn’t resolve this ad. Try again later.", ephemeral=True)
 
-        if not lfg_channel_id:
-            return await interaction.followup.send(
-                "No LFG channel is configured yet. Ask an admin to run `/lfg_channel set`.",
-                ephemeral=True,
-            )
+        if not author_id:
+            return await interaction.response.send_message("This ad no longer exists.", ephemeral=True)
 
-        # Resolve channel object
-        target_channel = interaction.guild.get_channel(lfg_channel_id) or await self.bot.fetch_channel(lfg_channel_id)
-        if not isinstance(target_channel, (discord.TextChannel, discord.Thread)):
-            return await interaction.followup.send("Configured LFG channel is not a text channel.", ephemeral=True)
+        # Resolve user objects
+        try:
+            author = await self.bot.fetch_user(author_id)
+        except Exception:
+            author = self.bot.get_user(author_id)
 
-        # Build embed/view
-        guild_icon_url = getattr(interaction.guild.icon, "url", None) if interaction.guild.icon else None
-        embed = build_ad_embed(
-            author=interaction.user,
-            game=game,
-            platform=platform,
-            region=region,
-            notes=notes,
-            guild_icon_url=guild_icon_url,
-            site_url=SITE_URL,
+        clicker = interaction.user
+
+        log.info(
+            "CONNECT clicker_id=%s ad_id=%s author_id=%s location=%s",
+            getattr(clicker, "id", None),
+            ad_id,
+            author_id,
+            post_loc,
         )
 
-        # Insert → send → persist post
+        # DM both sides (best-effort; users can block DMs)
+        dm_fail = False
         try:
-            # 1) Insert ad
-            async with pool.acquire() as conn:
-                async with conn.transaction():
-                    ad_id = await _insert_lfg_ad(
-                        conn,
-                        author_id=interaction.user.id,
-                        author_name=interaction.user.display_name,
-                        game=game,
-                        platform=platform,
-                        region=region,
-                        notes=notes,
-                        status=STATUS_DEFAULT,  # 'open' unless you switch default back to 'active'
-                    )
+            if author:
+                await author.send(
+                    f"🤝 Someone is interested in your LFG ad #{ad_id}! User: **{clicker}** (ID: {clicker.id}). "
+                    f"You can reply here to connect."
+                )
+        except Exception as e:
+            dm_fail = True
+            log.warning("Failed to DM ad author %s for ad %s: %s", author_id, ad_id, e)
 
-            # 2) Send message (need message_id for lfg_posts)
-            temp_view = AdActionView(ad_id=0, site_url=SITE_URL)
-            sent = await target_channel.send(embed=embed, view=temp_view)
-
-            # 3) Persist post and update buttons with real ad_id
-            async with pool.acquire() as conn:
-                async with conn.transaction():
-                    await _insert_lfg_post(
-                        conn,
-                        ad_id=ad_id,
-                        guild_id=interaction.guild.id,
-                        channel_id=sent.channel.id,
-                        message_id=sent.id,
-                    )
-
-            await sent.edit(view=AdActionView(ad_id=ad_id, site_url=SITE_URL))
-
-            await interaction.followup.send(
-                f"Your ad is live in {sent.channel.mention}! (Ad #{ad_id})",
-                ephemeral=True,
-            )
-
-        except asyncpg.PostgresError as db_err:
-            log.error("DB operation failed:", exc_info=db_err)
-            try:
-                if 'sent' in locals():
-                    await sent.delete()
-            except Exception:
-                pass
-            return await interaction.followup.send(
-                "Something went wrong while posting your ad. Please try again.",
-                ephemeral=True,
+        try:
+            await clicker.send(
+                f"🤝 You’ve been connected with the ad owner for LFG ad #{ad_id}. "
+                f"If they don’t message back soon, you can ping them in the channel where the ad was posted."
             )
         except Exception as e:
-            log.exception("Unexpected error posting ad: %s", e)
-            try:
-                if 'sent' in locals():
-                    await sent.delete()
-            except Exception:
-                pass
-            return await interaction.followup.send(
-                "Something went wrong while posting your ad. Please try again.",
+            dm_fail = True
+            log.warning("Failed to DM clicker %s for ad %s: %s", clicker.id, ad_id, e)
+
+        # Acknowledge ephemerally in the channel
+        if dm_fail:
+            await interaction.response.send_message(
+                "Tried to connect you via DM, but at least one DM failed. They may have DMs disabled.",
                 ephemeral=True,
             )
+        else:
+            await interaction.response.send_message("Check your DMs — I’ve connected you!", ephemeral=True)
+
+    async def _handle_report(self, interaction: discord.Interaction, custom_id: str):
+        try:
+            ad_id = int(custom_id.split(":", 1)[1])
+        except Exception:
+            return await interaction.response.send_message("Invalid ad id.", ephemeral=True)
+
+        log.info("REPORT_CLICK user_id=%s ad_id=%s", interaction.user.id, ad_id)
+        # Show a modal to collect details
+        await interaction.response.send_modal(ReportModal(ad_id))
 
 
 async def setup(bot: commands.Bot):
-    await bot.add_cog(LFGAds(bot))
+    await bot.add_cog(AdInteractions(bot))
