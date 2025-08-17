@@ -2,7 +2,7 @@ name: Deploy Web (staging & prod)
 
 on:
   push:
-    branches: [ develop, main ]
+    branches: [ staging, main ]
     paths:
       - "web/**"
       - ".github/workflows/deploy-web.yml"
@@ -22,7 +22,7 @@ jobs:
 
       # --- STAGING on develop ---
       - name: Deploy STAGING (develop)
-        if: github.ref_name == 'develop'
+        if: github.ref_name == 'staging'
         working-directory: web
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

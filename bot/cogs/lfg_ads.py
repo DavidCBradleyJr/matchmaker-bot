@@ -1,4 +1,3 @@
-# bot/cogs/lfg_ads.py
 from __future__ import annotations
 
 import asyncio
@@ -18,7 +17,6 @@ from ..db import get_pool
 
 LOGGER = logging.getLogger("lfg_ads")
 if not LOGGER.handlers:
-    # Basic handler if none configured globally
     h = logging.StreamHandler()
     fmt = logging.Formatter("[%(asctime)s] %(levelname)s lfg_ads: %(message)s")
     h.setFormatter(fmt)
@@ -227,8 +225,8 @@ class LfgAds(commands.Cog):
         if not acked:
             return
 
-        async def do_post_work() -> tuple[int, list[tuple[str, str]]]:
-            """Insert the ad, broadcast it, and return (posted_count, [(server_name, jump_url), ...])."""
+        async def do_post_work() -> int:
+            """Insert the ad, broadcast it, and return the number of servers posted to."""
             # --- DB INSERT + SETTINGS FETCH ---
             pool = get_pool()
             if pool is None:
@@ -282,23 +280,22 @@ class LfgAds(commands.Cog):
             # --- BROADCAST (CONCURRENT WITH CAP) ---
             view = ConnectButton(ad_id=ad_id)
             sem = asyncio.Semaphore(MAX_SEND_CONCURRENCY)
-            jump_links: list[tuple[str, str]] = []  # (server_name, jump_url)
             posted_count = 0
 
-            async def send_one(guild_id: int, channel_id: int) -> tuple[bool, tuple[str, str] | None]:
+            async def send_one(guild_id: int, channel_id: int) -> bool:
                 guild = self.bot.get_guild(guild_id)
                 if not guild:
-                    return False, None
+                    return False
                 channel = guild.get_channel(channel_id)
                 if not isinstance(channel, discord.TextChannel):
-                    return False, None
+                    return False
                 async with sem:
                     try:
-                        msg = await asyncio.wait_for(channel.send(embed=embed, view=view), timeout=PER_SEND_TIMEOUT)
-                        return True, (guild.name, msg.jump_url)
+                        await asyncio.wait_for(channel.send(embed=embed, view=view), timeout=PER_SEND_TIMEOUT)
+                        return True
                     except (discord.Forbidden, discord.HTTPException, asyncio.TimeoutError) as exc:
-                        LOGGER.info("Send to %s#%s failed: %r", guild.name, channel_id, exc)
-                        return False, None
+                        LOGGER.info("Send to %s#%s failed: %r", guild.name if guild else guild_id, channel_id, exc)
+                        return False
 
             tasks = [
                 asyncio.create_task(send_one(int(r["guild_id"]), int(r["lfg_channel_id"])))
@@ -306,16 +303,14 @@ class LfgAds(commands.Cog):
             ]
 
             for coro in asyncio.as_completed(tasks):
-                ok, info = await coro
+                ok = await coro
                 if ok:
                     posted_count += 1
-                    if info and len(jump_links) < 3:
-                        jump_links.append(info)
 
-            return posted_count, jump_links
+            return posted_count
 
         try:
-            posted, jump_links = await asyncio.wait_for(do_post_work(), timeout=POST_TIMEOUT_SECONDS)
+            posted = await asyncio.wait_for(do_post_work(), timeout=POST_TIMEOUT_SECONDS)
         except asyncio.TimeoutError:
             LOGGER.warning("post() timed out after %ss", POST_TIMEOUT_SECONDS)
             try:
@@ -345,14 +340,10 @@ class LfgAds(commands.Cog):
                     )
                 )
             else:
-                link_lines = [f"{i}. **{server}** — {url}" for i, (server, url) in enumerate(jump_links, start=1)]
-                more = f"\n…and **{posted - len(jump_links)}** more." if posted > len(jump_links) else ""
                 await interaction.edit_original_response(
                     content=(
                         "✅ Your ad was posted!"
                         f"\n• **Servers posted to:** {posted}"
-                        + (f"\n• **Links:**\n" + "\n".join(link_lines) if link_lines else "")
-                        + more
                     )
                 )
         except (discord.NotFound, discord.HTTPException):
