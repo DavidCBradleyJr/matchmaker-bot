@@ -66,12 +66,6 @@ export default function Privacy() {
           absolute, but we aim for sensible, low-risk defaults.
         </p>
       </Section>
-
-      <Section title="Contact">
-        <p>
-          Questions or removal requests? Reach out to the server owner or the bot maintainers (listed on the Install page).
-        </p>
-      </Section>
     </div>
   );
 }
