@@ -1,363 +1,393 @@
 # bot/cogs/lfg_ads.py
+
 from __future__ import annotations
 
-import asyncio
 import logging
-import os
-import traceback
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Optional
 
+import asyncpg
 import discord
-from discord import app_commands, ui
+from discord import app_commands
 from discord.ext import commands
 
-from ..db import get_pool
+log = logging.getLogger("lfg_ads")
 
-# ---------------------
-# Logging
-# ---------------------
+# ---- Config ---------------------------------------------------------------
 
-LOGGER = logging.getLogger("lfg_ads")
-if not LOGGER.handlers:
-    # Basic handler if none configured globally
-    h = logging.StreamHandler()
-    fmt = logging.Formatter("[%(asctime)s] %(levelname)s lfg_ads: %(message)s")
-    h.setFormatter(fmt)
-    LOGGER.addHandler(h)
-LOGGER.setLevel(logging.INFO)
+STATUS_DEFAULT = "open"  # change to "active" if you drop 'open' later
+SITE_URL = "https://matchmaker.gg"  # branding + link button target
 
-# ---------------------
-# Config
-# ---------------------
+PLATFORM_COLORS = {
+    "pc": 0x5865F2,        # Discord blurple
+    "xbox": 0x107C10,
+    "playstation": 0x003791,
+    "ps": 0x003791,
+    "switch": 0xE60012,
+    "mobile": 0x00A3FF,
+    "other": 0x2B2D31,
+}
 
-# Overall time we allow for inserting + broadcasting the ad before showing a timeout to the user.
-POST_TIMEOUT_SECONDS = int(os.getenv("LFG_POST_TIMEOUT_SECONDS", "60"))
+PLATFORM_EMOJIS = {
+    "pc": "🖥️",
+    "xbox": "🟩",
+    "playstation": "🟦",
+    "ps": "🟦",
+    "switch": "🔴",
+    "mobile": "📱",
+    "other": "🎮",
+}
 
-# Max concurrent channel sends to avoid rate-limit spikes
-MAX_SEND_CONCURRENCY = int(os.getenv("LFG_POST_MAX_CONCURRENCY", "5"))
+# ---- Helpers --------------------------------------------------------------
 
-# Per-channel send timeout (seconds)
-PER_SEND_TIMEOUT = int(os.getenv("LFG_POST_PER_SEND_TIMEOUT", "8"))
+def _platform_color(platform: str | None) -> int:
+    if not platform:
+        return PLATFORM_COLORS["other"]
+    return PLATFORM_COLORS.get(platform.lower(), PLATFORM_COLORS["other"])
 
-# If set (e.g. "1"), include a short exception typename in the ephemeral error to help debugging
-SURFACE_ERROR_CODE = os.getenv("LFG_SURFACE_ERROR_CODE", "1") == "1"
+def _platform_emoji(platform: str | None) -> str:
+    if not platform:
+        return PLATFORM_EMOJIS["other"]
+    return PLATFORM_EMOJIS.get(platform.lower(), PLATFORM_EMOJIS["other"])
+
+def _safe(s: Optional[str], dash: str = "—") -> str:
+    s = (s or "").strip()
+    return s if s else dash
+
+def _trim_notes(notes: Optional[str], limit: int = 300) -> Optional[str]:
+    if not notes:
+        return None
+    n = notes.strip()
+    if not n:
+        return None
+    if len(n) > limit:
+        return n[: limit - 1] + "…"
+    return n
+
+@dataclass
+class CreatedAd:
+    id: int
+    message_id: int
+    channel_id: int
+    guild_id: int
 
 
-# ---------------------
-# Utilities
-# ---------------------
+# ---- Embed & View ---------------------------------------------------------
 
-async def safe_ack(
-    interaction: discord.Interaction,
+def build_ad_embed(
     *,
-    message: str | None = None,
-    ephemeral: bool = True,
-    use_thinking: bool = True,
-) -> bool:
-    """
-    Safely acknowledge an interaction exactly once.
-    Returns:
-      True  -> we successfully acknowledged (you may use followups / edits)
-      False -> token invalidated or already acked elsewhere (avoid followups/edits)
-    """
-    try:
-        if interaction.response.is_done():
-            if message:
-                try:
-                    await interaction.followup.send(message, ephemeral=ephemeral)
-                except (discord.NotFound, discord.HTTPException):
-                    return False
-            return True
-        else:
-            if message:
-                # Visible immediate message (better UX during deploys than a spinner)
-                await interaction.response.send_message(message, ephemeral=ephemeral)
-            else:
-                # "thinking" shows the visible spinner; keep False when you don't want a bubble
-                await interaction.response.defer(ephemeral=ephemeral, thinking=use_thinking)
-            return True
-    except discord.InteractionResponded:
-        return True
-    except discord.NotFound:
-        return False
-    except discord.HTTPException:
-        return False
+    author: discord.abc.User,
+    game: str,
+    platform: Optional[str],
+    region: Optional[str],
+    notes: Optional[str],
+    guild_icon_url: Optional[str],
+    site_url: str = SITE_URL,
+) -> discord.Embed:
+    color = _platform_color(platform)
+    pfx = _platform_emoji(platform)
+    title = f"{pfx} {_safe(game)} • {_safe((platform or '').title(), dash='—')}"
+
+    desc_lines: list[str] = []
+    # Tiny, subtle credit (kept in body so it's clickable)
+    desc_lines.append(f"*Powered by [Matchmaker]({site_url})*")
+
+    embed = discord.Embed(
+        title=title,
+        description="\n".join(desc_lines),
+        color=color,
+        timestamp=datetime.now(timezone.utc),
+    )
+
+    avatar = getattr(author, "display_avatar", None)
+    if avatar:
+        embed.set_author(
+            name=f"{author.display_name} is looking for a squad",
+            icon_url=author.display_avatar.url,
+        )
+    else:
+        embed.set_author(name=f"{author.display_name} is looking for a squad")
+
+    embed.add_field(name="Region", value=_safe(region), inline=True)
+
+    trimmed = _trim_notes(notes)
+    if trimmed:
+        embed.add_field(name="Notes", value=trimmed, inline=False)
+
+    if guild_icon_url:
+        embed.set_footer(text="Matchmaker • Find teammates fast", icon_url=guild_icon_url)
+    else:
+        embed.set_footer(text="Matchmaker • Find teammates fast")
+
+    return embed
 
 
-def _err_code(prefix: str, exc: BaseException | None = None) -> str:
-    """Short error identifier to surface to the user (optional)."""
-    if not SURFACE_ERROR_CODE:
-        return ""
-    typ = type(exc).__name__ if exc else ""
-    return f" ({prefix}:{typ})" if typ else f" ({prefix})"
-
-
-# ---------------------
-# Button View
-# ---------------------
-
-class ConnectButton(ui.View):
-    def __init__(self, ad_id: int, *, timeout: float | None = 1800):
+class AdActionView(discord.ui.View):
+    def __init__(self, *, ad_id: int, site_url: str = SITE_URL, timeout: Optional[float] = 1800):
         super().__init__(timeout=timeout)
         self.ad_id = ad_id
+        self.site_url = site_url
 
-    @ui.button(label="I’m interested", style=discord.ButtonStyle.success, custom_id="lfg:connect")
-    async def connect(self, interaction: discord.Interaction, button: ui.Button):
-        # ACK early, but silently (no spinner bubble)
-        acked = await safe_ack(interaction, message=None, ephemeral=True, use_thinking=False)
+        # Primary connect button
+        self.add_item(discord.ui.Button(
+            style=discord.ButtonStyle.primary,
+            label="I’m interested",
+            custom_id=f"ad_connect:{ad_id}",
+            emoji="🤝",
+        ))
 
-        sent_followup = False
-        try:
-            user = interaction.user
-            pool = get_pool()
-            if pool is None:
-                raise RuntimeError("DB pool is not initialized; check DATABASE_URL and pool init in main().")
+        # Optional: view on website
+        self.add_item(discord.ui.Button(
+            style=discord.ButtonStyle.link,
+            label="View on Web",
+            url=f"{self.site_url}/ads/{ad_id}",
+        ))
 
-            # Atomically switch ad to connected; first click wins.
-            async with pool.acquire() as conn:
-                ad = await conn.fetchrow(
-                    """
-                    UPDATE lfg_ads
-                    SET status = 'connected', connector_id = $1, connector_name = $2
-                    WHERE id = $3 AND status = 'open'
-                    RETURNING id, author_id, author_name, game, platform, region, notes
-                    """,
-                    int(user.id),
-                    str(user),
-                    self.ad_id,
-                )
-
-            if not ad:
-                if acked:
-                    await interaction.followup.send(
-                        "Someone already connected with this ad. Try another one!",
-                        ephemeral=True,
-                    )
-                    sent_followup = True
-                return
-
-            # DM both parties (best-effort; failures are swallowed)
-            owner_id = int(ad["author_id"])
-            owner_user = interaction.client.get_user(owner_id) or await interaction.client.fetch_user(owner_id)
-
-            if owner_user:
-                try:
-                    await owner_user.send(
-                        f"✅ Someone is interested in your **{ad['game']}** ad (#{self.ad_id}).\n"
-                        f"Connector: {user.mention}"
-                    )
-                except Exception:
-                    LOGGER.info("Owner DM failed; continuing", exc_info=True)
-
-            try:
-                await user.send(
-                    f"✅ I connected you with **{ad['author_name']}** for **{ad['game']}**.\n"
-                    f"Start a chat here: <@{owner_id}>"
-                )
-            except Exception:
-                LOGGER.info("Connector DM failed; continuing", exc_info=True)
-
-            # Include a jump link back to the exact message the user clicked
-            jump = None
-            try:
-                if interaction.message:
-                    jump = interaction.message.jump_url
-            except Exception:
-                jump = None
-
-            if acked:
-                if jump:
-                    await interaction.followup.send(
-                        f"✅ I DM’d you both so you can coordinate. Have fun!\n"
-                        f"Jump back to the ad: {jump}",
-                        ephemeral=True,
-                    )
-                else:
-                    await interaction.followup.send(
-                        "✅ I DM’d you both so you can coordinate. Have fun!",
-                        ephemeral=True,
-                    )
-                sent_followup = True
-
-        except Exception as exc:
-            LOGGER.error("ConnectButton.connect failed:\n%s", traceback.format_exc())
-            if acked and not sent_followup:
-                try:
-                    await interaction.followup.send(
-                        "Something went wrong while connecting. Try again." + _err_code("CONNECT", exc),
-                        ephemeral=True,
-                    )
-                    sent_followup = True
-                except Exception:
-                    pass
+        # Optional: report
+        self.add_item(discord.ui.Button(
+            style=discord.ButtonStyle.secondary,
+            label="Report",
+            custom_id=f"ad_report:{ad_id}",
+            emoji="🚩",
+        ))
 
 
-# ---------------------
-# Cog + Commands
-# ---------------------
+# ---- DB access (matches your schema) -------------------------------------
 
-class LfgAds(commands.Cog):
+async def _fetch_lfg_channel_id(conn: asyncpg.Connection, guild_id: int) -> Optional[int]:
+    row = await conn.fetchrow(
+        "SELECT lfg_channel_id FROM guild_settings WHERE guild_id = $1",
+        guild_id,
+    )
+    return int(row["lfg_channel_id"]) if row and row["lfg_channel_id"] else None
+
+
+async def _insert_lfg_ad(
+    conn: asyncpg.Connection,
+    *,
+    author_id: int,
+    author_name: Optional[str],
+    game: str,
+    platform: Optional[str],
+    region: Optional[str],
+    notes: Optional[str],
+    status: str,
+) -> int:
+    """
+    INSERT INTO lfg_ads and return new ad id.
+    Columns per schema:
+      id BIGSERIAL PK,
+      author_id BIGINT NOT NULL,
+      author_name TEXT,
+      game TEXT NOT NULL,
+      platform TEXT,
+      region TEXT,
+      notes TEXT,
+      status ad_status NOT NULL DEFAULT 'active' (you set to 'open'),
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    """
+    return await conn.fetchval(
+        """
+        INSERT INTO lfg_ads (
+            author_id, author_name, game, platform, region, notes, status
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7::ad_status)
+        RETURNING id
+        """,
+        author_id, author_name, game, platform, region, notes, status,
+    )
+
+
+async def _insert_lfg_post(
+    conn: asyncpg.Connection,
+    *,
+    ad_id: int,
+    guild_id: int,
+    channel_id: int,
+    message_id: int,
+) -> None:
+    """
+    INSERT INTO lfg_posts (ad_id, guild_id, channel_id, message_id)
+    PK (ad_id, guild_id)
+    """
+    await conn.execute(
+        """
+        INSERT INTO lfg_posts (ad_id, guild_id, channel_id, message_id)
+        VALUES ($1, $2, $3, $4)
+        """,
+        ad_id, guild_id, channel_id, message_id,
+    )
+
+
+async def _upsert_guild_channel(
+    conn: asyncpg.Connection,
+    *,
+    guild_id: int,
+    channel_id: int,
+) -> None:
+    await conn.execute(
+        """
+        INSERT INTO guild_settings (guild_id, lfg_channel_id)
+        VALUES ($1, $2)
+        ON CONFLICT (guild_id)
+        DO UPDATE SET lfg_channel_id = EXCLUDED.lfg_channel_id,
+                      updated_at = NOW()
+        """,
+        guild_id, channel_id,
+    )
+
+
+# ---- Slash command Cog ----------------------------------------------------
+
+class LFGAds(commands.Cog):
+    """LFG ads: create and broadcast clean, branded posts with action buttons."""
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    lfg = app_commands.Group(name="lfg_ad", description="Create and manage LFG ads")
+    lfg = app_commands.Group(name="lfg", description="Find teammates fast.")
 
-    @lfg.command(name="post", description="Post an LFG ad")
+    @lfg.command(name="post", description="Post an LFG ad to your server’s LFG channel.")
     @app_commands.describe(
-        game="The game you want to play",
-        platform="PC/PS/Xbox/Switch/Mobile (optional)",
-        region="NA/EU/APAC/Global (optional)",
-        notes="Anything else people should know (optional)",
+        game="What game are you playing?",
+        platform="PC, Xbox, PlayStation, Switch, Mobile, etc. (optional)",
+        region="NA/EU/Asia or a timezone/region name (optional)",
+        notes="Anything else teammates should know (optional)",
     )
     async def post(
         self,
         interaction: discord.Interaction,
         game: str,
-        platform: str | None = None,
-        region: str | None = None,
-        notes: str | None = None,
+        platform: Optional[str] = None,
+        region: Optional[str] = None,
+        notes: Optional[str] = None,
     ):
-        """
-        Flow:
-        - Send an immediate ephemeral "Posting your ad…" (visible, not a spinner)
-        - Within a timeout, insert ad + broadcast to configured guild channels (concurrent with a cap)
-        - Edit the original message to the final result (success or guidance)
-        """
-        # Send the initial message (so deploy interrupts don't leave a spinner)
-        acked = await safe_ack(interaction, message="Posting your ad…", ephemeral=True, use_thinking=False)
-        if not acked:
-            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
 
-        async def do_post_work() -> tuple[int, list[tuple[str, str]]]:
-            """Insert the ad, broadcast it, and return (posted_count, [(server_name, jump_url), ...])."""
-            # --- DB INSERT + SETTINGS FETCH ---
-            pool = get_pool()
-            if pool is None:
-                raise RuntimeError("DB pool is not initialized; check DATABASE_URL and pool init in main().")
+        if not interaction.guild:
+            return await interaction.followup.send("This command must be used in a server.", ephemeral=True)
 
-            try:
-                async with pool.acquire() as conn:
-                    ad_id = await conn.fetchval(
-                        """
-                        INSERT INTO lfg_ads (author_id, author_name, game, platform, region, notes, status)
-                        VALUES ($1, $2, $3, $4, $5, $6, 'open')
-                        RETURNING id
-                        """,
-                        int(interaction.user.id),
-                        str(interaction.user),
-                        game,
-                        platform,
-                        region,
-                        notes,
-                    )
-            except Exception as exc:
-                LOGGER.error("DB insert failed:\n%s", traceback.format_exc())
-                raise RuntimeError("DB_INSERT") from exc
+        pool: asyncpg.Pool = getattr(self.bot, "db_pool", None)
+        if pool is None:
+            log.error("Database pool missing on bot.")
+            return await interaction.followup.send("DB connection not available. Try again later.", ephemeral=True)
 
-            try:
-                title_bits: list[str] = [game]
-                if platform:
-                    title_bits.append(f"• {platform}")
-                if region:
-                    title_bits.append(f"• {region}")
-
-                embed = discord.Embed(
-                    title=" ".join(title_bits),
-                    description=notes or "Looking for teammates!",
-                    color=discord.Color.blurple(),
-                )
-                embed.set_author(
-                    name=str(interaction.user),
-                    icon_url=interaction.user.display_avatar.url,
-                )
-                embed.set_footer(text=f"Posted by {interaction.user} • Ad #{ad_id}")
-
-                async with pool.acquire() as conn:
-                    rows = await conn.fetch(
-                        "SELECT guild_id, lfg_channel_id FROM guild_settings WHERE lfg_channel_id IS NOT NULL"
-                    )
-            except Exception as exc:
-                LOGGER.error("Building embed or guild settings query failed:\n%s", traceback.format_exc())
-                raise RuntimeError("GUILD_QUERY") from exc
-
-            # --- BROADCAST (CONCURRENT WITH CAP) ---
-            view = ConnectButton(ad_id=ad_id)
-            sem = asyncio.Semaphore(MAX_SEND_CONCURRENCY)
-            jump_links: list[tuple[str, str]] = []  # (server_name, jump_url)
-            posted_count = 0
-
-            async def send_one(guild_id: int, channel_id: int) -> tuple[bool, tuple[str, str] | None]:
-                guild = self.bot.get_guild(guild_id)
-                if not guild:
-                    return False, None
-                channel = guild.get_channel(channel_id)
-                if not isinstance(channel, discord.TextChannel):
-                    return False, None
-                async with sem:
-                    try:
-                        msg = await asyncio.wait_for(channel.send(embed=embed, view=view), timeout=PER_SEND_TIMEOUT)
-                        return True, (guild.name, msg.jump_url)
-                    except (discord.Forbidden, discord.HTTPException, asyncio.TimeoutError) as exc:
-                        LOGGER.info("Send to %s#%s failed: %r", guild.name, channel_id, exc)
-                        return False, None
-
-            tasks = [
-                asyncio.create_task(send_one(int(r["guild_id"]), int(r["lfg_channel_id"])))
-                for r in rows
-            ]
-
-            for coro in asyncio.as_completed(tasks):
-                ok, info = await coro
-                if ok:
-                    posted_count += 1
-                    if info and len(jump_links) < 3:
-                        jump_links.append(info)
-
-            return posted_count, jump_links
-
+        # Resolve target channel from DB
         try:
-            posted, jump_links = await asyncio.wait_for(do_post_work(), timeout=POST_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError:
-            LOGGER.warning("post() timed out after %ss", POST_TIMEOUT_SECONDS)
+            async with pool.acquire() as conn:
+                channel_id = await _fetch_lfg_channel_id(conn, interaction.guild.id)
+        except Exception as e:
+            log.exception("Failed to fetch LFG channel: %s", e)
+            return await interaction.followup.send("Couldn’t find the LFG channel for this server.", ephemeral=True)
+
+        if not channel_id:
+            return await interaction.followup.send(
+                "No LFG channel is configured for this server yet. Ask an admin to run `/lfg set_channel`.",
+                ephemeral=True,
+            )
+
+        # Ensure we have a live channel object
+        target_channel = interaction.guild.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
+        if not isinstance(target_channel, (discord.TextChannel, discord.Thread)):
+            return await interaction.followup.send("Configured LFG channel is not a text channel.", ephemeral=True)
+
+        # Build embed & view
+        guild_icon_url = getattr(interaction.guild.icon, "url", None) if interaction.guild.icon else None
+        embed = build_ad_embed(
+            author=interaction.user,
+            game=game,
+            platform=platform,
+            region=region,
+            notes=notes,
+            guild_icon_url=guild_icon_url,
+            site_url=SITE_URL,
+        )
+
+        # Insert ad → send message → record lfg_posts
+        try:
+            async with pool.acquire() as conn:
+                async with conn.transaction():
+                    ad_id = await _insert_lfg_ad(
+                        conn,
+                        author_id=interaction.user.id,
+                        author_name=interaction.user.display_name,
+                        game=game,
+                        platform=platform,
+                        region=region,
+                        notes=notes,
+                        status=STATUS_DEFAULT,  # 'open' per your ALTER; flip to 'active' if you undo it
+                    )
+
+            # Send the message (need message_id for lfg_posts)
+            temp_view = AdActionView(ad_id=0, site_url=SITE_URL)
+            sent = await target_channel.send(embed=embed, view=temp_view)
+
+            # Now persist lfg_posts and update the buttons with the real ad_id
+            async with pool.acquire() as conn:
+                async with conn.transaction():
+                    await _insert_lfg_post(
+                        conn,
+                        ad_id=ad_id,
+                        guild_id=interaction.guild.id,
+                        channel_id=sent.channel.id,
+                        message_id=sent.id,
+                    )
+
+            new_view = AdActionView(ad_id=ad_id, site_url=SITE_URL)
+            await sent.edit(view=new_view)
+
+            await interaction.followup.send(
+                f"Your ad is live in {sent.channel.mention}! (Ad #{ad_id})",
+                ephemeral=True,
+            )
+
+        except asyncpg.PostgresError as db_err:
+            log.error("DB operation failed:", exc_info=db_err)
+            # Best effort: remove the orphaned message if it was sent
             try:
-                await interaction.edit_original_response(
-                    content="⏳ Timed out while posting your ad. Please try again." + _err_code("TIMEOUT")
-                )
+                if 'sent' in locals():
+                    await sent.delete()
             except Exception:
                 pass
-            return
-        except Exception as exc:
-            # Any error inside do_post_work gets logged there; we surface a short code here.
+            return await interaction.followup.send(
+                "Something went wrong while posting your ad. Please try again.",
+                ephemeral=True,
+            )
+        except Exception as e:
+            log.exception("Unexpected error sending ad: %s", e)
             try:
-                await interaction.edit_original_response(
-                    content="Something went wrong while posting your ad. Please try again." + _err_code("POST", exc)
-                )
+                if 'sent' in locals():
+                    await sent.delete()
             except Exception:
                 pass
-            return
+            return await interaction.followup.send(
+                "Something went wrong while posting your ad. Please try again.",
+                ephemeral=True,
+            )
 
-        # Build and send the final result (edit the original message)
+    # Admin: set the per-guild LFG channel in guild_settings.lfg_channel_id
+    @lfg.command(name="set_channel", description="(Admin) Set the channel used for LFG ads.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(channel="Pick the LFG ad channel")
+    async def set_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        await interaction.response.defer(ephemeral=True)
+        if not interaction.guild:
+            return await interaction.followup.send("This command must be used in a server.", ephemeral=True)
+
+        pool: asyncpg.Pool = getattr(self.bot, "db_pool", None)
+        if pool is None:
+            return await interaction.followup.send("DB connection not available.", ephemeral=True)
+
         try:
-            if posted == 0:
-                await interaction.edit_original_response(
-                    content=(
-                        "Your ad was saved, but no servers have an LFG channel configured yet.\n"
-                        "Ask server owners to run `/lfg_channel set #channel`."
-                    )
-                )
-            else:
-                link_lines = [f"{i}. **{server}** — {url}" for i, (server, url) in enumerate(jump_links, start=1)]
-                more = f"\n…and **{posted - len(jump_links)}** more." if posted > len(jump_links) else ""
-                await interaction.edit_original_response(
-                    content=(
-                        "✅ Your ad was posted!"
-                        f"\n• **Servers posted to:** {posted}"
-                        + (f"\n• **Links:**\n" + "\n".join(link_lines) if link_lines else "")
-                        + more
-                    )
-                )
-        except (discord.NotFound, discord.HTTPException):
-            pass
+            async with pool.acquire() as conn:
+                await _upsert_guild_channel(conn, guild_id=interaction.guild.id, channel_id=channel.id)
+        except Exception as e:
+            log.exception("Failed to set LFG channel: %s", e)
+            return await interaction.followup.send("Couldn’t save the LFG channel.", ephemeral=True)
+
+        await interaction.followup.send(f"LFG channel set to {channel.mention}.", ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
-    await bot.add_cog(LfgAds(bot), override=True)
+    await bot.add_cog(LFGAds(bot))
