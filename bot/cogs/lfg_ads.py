@@ -1,25 +1,45 @@
+# bot/cogs/lfg_ads.py
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
+import traceback
+
 import discord
 from discord import app_commands, ui
 from discord.ext import commands
 
 from ..db import get_pool
 
+# ---------------------
+# Logging
+# ---------------------
+
+LOGGER = logging.getLogger("lfg_ads")
+if not LOGGER.handlers:
+    # Basic handler if none configured globally
+    h = logging.StreamHandler()
+    fmt = logging.Formatter("[%(asctime)s] %(levelname)s lfg_ads: %(message)s")
+    h.setFormatter(fmt)
+    LOGGER.addHandler(h)
+LOGGER.setLevel(logging.INFO)
 
 # ---------------------
 # Config
 # ---------------------
 
 # Overall time we allow for inserting + broadcasting the ad before showing a timeout to the user.
-POST_TIMEOUT_SECONDS = 60
+POST_TIMEOUT_SECONDS = int(os.getenv("LFG_POST_TIMEOUT_SECONDS", "60"))
 
 # Max concurrent channel sends to avoid rate-limit spikes
-MAX_SEND_CONCURRENCY = 5
+MAX_SEND_CONCURRENCY = int(os.getenv("LFG_POST_MAX_CONCURRENCY", "5"))
 
 # Per-channel send timeout (seconds)
-PER_SEND_TIMEOUT = 8
+PER_SEND_TIMEOUT = int(os.getenv("LFG_POST_PER_SEND_TIMEOUT", "8"))
+
+# If set (e.g. "1"), include a short exception typename in the ephemeral error to help debugging
+SURFACE_ERROR_CODE = os.getenv("LFG_SURFACE_ERROR_CODE", "1") == "1"
 
 
 # ---------------------
@@ -63,6 +83,14 @@ async def safe_ack(
         return False
 
 
+def _err_code(prefix: str, exc: BaseException | None = None) -> str:
+    """Short error identifier to surface to the user (optional)."""
+    if not SURFACE_ERROR_CODE:
+        return ""
+    typ = type(exc).__name__ if exc else ""
+    return f" ({prefix}:{typ})" if typ else f" ({prefix})"
+
+
 # ---------------------
 # Button View
 # ---------------------
@@ -81,6 +109,8 @@ class ConnectButton(ui.View):
         try:
             user = interaction.user
             pool = get_pool()
+            if pool is None:
+                raise RuntimeError("DB pool is not initialized; check DATABASE_URL and pool init in main().")
 
             # Atomically switch ad to connected; first click wins.
             async with pool.acquire() as conn:
@@ -116,7 +146,7 @@ class ConnectButton(ui.View):
                         f"Connector: {user.mention}"
                     )
                 except Exception:
-                    pass
+                    LOGGER.info("Owner DM failed; continuing", exc_info=True)
 
             try:
                 await user.send(
@@ -124,7 +154,7 @@ class ConnectButton(ui.View):
                     f"Start a chat here: <@{owner_id}>"
                 )
             except Exception:
-                pass
+                LOGGER.info("Connector DM failed; continuing", exc_info=True)
 
             # Include a jump link back to the exact message the user clicked
             jump = None
@@ -148,11 +178,12 @@ class ConnectButton(ui.View):
                     )
                 sent_followup = True
 
-        except Exception:
+        except Exception as exc:
+            LOGGER.error("ConnectButton.connect failed:\n%s", traceback.format_exc())
             if acked and not sent_followup:
                 try:
                     await interaction.followup.send(
-                        "Something went wrong while connecting. Try again.",
+                        "Something went wrong while connecting. Try again." + _err_code("CONNECT", exc),
                         ephemeral=True,
                     )
                     sent_followup = True
@@ -198,23 +229,31 @@ class LfgAds(commands.Cog):
 
         async def do_post_work() -> tuple[int, list[tuple[str, str]]]:
             """Insert the ad, broadcast it, and return (posted_count, [(server_name, jump_url), ...])."""
+            # --- DB INSERT + SETTINGS FETCH ---
             pool = get_pool()
+            if pool is None:
+                raise RuntimeError("DB pool is not initialized; check DATABASE_URL and pool init in main().")
 
-            async with pool.acquire() as conn:
-                ad_id = await conn.fetchval(
-                    """
-                    INSERT INTO lfg_ads (author_id, author_name, game, platform, region, notes, status)
-                    VALUES ($1, $2, $3, $4, $5, $6, 'open')
-                    RETURNING id
-                    """,
-                    int(interaction.user.id),
-                    str(interaction.user),
-                    game,
-                    platform,
-                    region,
-                    notes,
-                )
+            try:
+                async with pool.acquire() as conn:
+                    ad_id = await conn.fetchval(
+                        """
+                        INSERT INTO lfg_ads (author_id, author_name, game, platform, region, notes, status)
+                        VALUES ($1, $2, $3, $4, $5, $6, 'open')
+                        RETURNING id
+                        """,
+                        int(interaction.user.id),
+                        str(interaction.user),
+                        game,
+                        platform,
+                        region,
+                        notes,
+                    )
+            except Exception as exc:
+                LOGGER.error("DB insert failed:\n%s", traceback.format_exc())
+                raise RuntimeError("DB_INSERT") from exc
 
+            try:
                 title_bits: list[str] = [game]
                 if platform:
                     title_bits.append(f"• {platform}")
@@ -232,12 +271,16 @@ class LfgAds(commands.Cog):
                 )
                 embed.set_footer(text=f"Posted by {interaction.user} • Ad #{ad_id}")
 
-                rows = await conn.fetch(
-                    "SELECT guild_id, lfg_channel_id FROM guild_settings WHERE lfg_channel_id IS NOT NULL"
-                )
+                async with pool.acquire() as conn:
+                    rows = await conn.fetch(
+                        "SELECT guild_id, lfg_channel_id FROM guild_settings WHERE lfg_channel_id IS NOT NULL"
+                    )
+            except Exception as exc:
+                LOGGER.error("Building embed or guild settings query failed:\n%s", traceback.format_exc())
+                raise RuntimeError("GUILD_QUERY") from exc
 
+            # --- BROADCAST (CONCURRENT WITH CAP) ---
             view = ConnectButton(ad_id=ad_id)
-
             sem = asyncio.Semaphore(MAX_SEND_CONCURRENCY)
             jump_links: list[tuple[str, str]] = []  # (server_name, jump_url)
             posted_count = 0
@@ -249,12 +292,12 @@ class LfgAds(commands.Cog):
                 channel = guild.get_channel(channel_id)
                 if not isinstance(channel, discord.TextChannel):
                     return False, None
-
                 async with sem:
                     try:
                         msg = await asyncio.wait_for(channel.send(embed=embed, view=view), timeout=PER_SEND_TIMEOUT)
                         return True, (guild.name, msg.jump_url)
-                    except (discord.Forbidden, discord.HTTPException, asyncio.TimeoutError):
+                    except (discord.Forbidden, discord.HTTPException, asyncio.TimeoutError) as exc:
+                        LOGGER.info("Send to %s#%s failed: %r", guild.name, channel_id, exc)
                         return False, None
 
             tasks = [
@@ -274,17 +317,19 @@ class LfgAds(commands.Cog):
         try:
             posted, jump_links = await asyncio.wait_for(do_post_work(), timeout=POST_TIMEOUT_SECONDS)
         except asyncio.TimeoutError:
+            LOGGER.warning("post() timed out after %ss", POST_TIMEOUT_SECONDS)
             try:
                 await interaction.edit_original_response(
-                    content="⏳ Timed out while posting your ad. Please try again."
+                    content="⏳ Timed out while posting your ad. Please try again." + _err_code("TIMEOUT")
                 )
             except Exception:
                 pass
             return
-        except Exception:
+        except Exception as exc:
+            # Any error inside do_post_work gets logged there; we surface a short code here.
             try:
                 await interaction.edit_original_response(
-                    content="Something went wrong while posting your ad. Please try again."
+                    content="Something went wrong while posting your ad. Please try again." + _err_code("POST", exc)
                 )
             except Exception:
                 pass
