@@ -1,7 +1,7 @@
 from __future__ import annotations
 import time
 from typing import Optional
-from bot.db import get_pool  # uses your Neon asyncpg pool
+from bot.db import get_pool  # your Neon asyncpg pool
 
 _SCHEMA = [
     """
@@ -16,7 +16,6 @@ _SCHEMA = [
 ]
 _ready = False
 
-
 async def ensure_schema() -> None:
     global _ready
     if _ready:
@@ -26,7 +25,6 @@ async def ensure_schema() -> None:
         for stmt in _SCHEMA:
             await conn.execute(stmt)
     _ready = True
-
 
 async def is_user_timed_out(user_id: int, guild_id: int) -> bool:
     pool = get_pool()
@@ -44,7 +42,6 @@ async def is_user_timed_out(user_id: int, guild_id: int) -> bool:
         return False
     return True
 
-
 async def get_timeout_expiry(user_id: int, guild_id: int) -> Optional[int]:
     pool = get_pool()
     async with pool.acquire() as conn:
@@ -54,7 +51,6 @@ async def get_timeout_expiry(user_id: int, guild_id: int) -> Optional[int]:
             user_id, guild_id,
         )
     return int(row["exp"]) if row else None
-
 
 async def set_timeout(user_id: int, guild_id: int, minutes: int) -> None:
     minutes = max(0, int(minutes))
@@ -69,7 +65,6 @@ async def set_timeout(user_id: int, guild_id: int, minutes: int) -> None:
             """,
             user_id, guild_id, minutes,
         )
-
 
 async def clear_timeout(user_id: int, guild_id: int) -> None:
     pool = get_pool()

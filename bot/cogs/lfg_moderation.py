@@ -16,7 +16,6 @@ from bot.utils.timeouts import (
 
 log = logging.getLogger(__name__)
 
-
 async def slash_guard(interaction: discord.Interaction) -> bool:
     try:
         user = interaction.user
@@ -34,7 +33,6 @@ async def slash_guard(interaction: discord.Interaction) -> bool:
     except Exception:
         log.exception("slash_guard failed")
         return True
-
 
 class LFGModeration(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
@@ -83,21 +81,18 @@ class LFGModeration(commands.Cog):
     ):
         if not await self.is_admin(interaction):
             return
-
         guild_id = interaction.guild_id
         if guild_id is None:
             await interaction.response.send_message(
                 "This command must be used in a server.", ephemeral=True
             )
             return
-
         if minutes <= 0:
             await clear_timeout(member.id, guild_id)
             await interaction.response.send_message(
                 f"Cleared timeout for {member.mention}.", ephemeral=True
             )
             return
-
         await set_timeout(member.id, guild_id, minutes)
         await interaction.response.send_message(
             f"Timed out {member.mention} for {minutes} minute(s).",
@@ -121,20 +116,17 @@ class LFGModeration(commands.Cog):
                 "This command must be used in a server.", ephemeral=True
             )
             return
-
         timed = await is_user_timed_out(member.id, guild_id)
         if not timed:
             await interaction.response.send_message(
                 f"{member.mention} is not timed out.", ephemeral=True
             )
             return
-
         exp = await get_timeout_expiry(member.id, guild_id)
         pretty = f"<t:{exp}:R>" if exp else "an unknown time"
         await interaction.response.send_message(
             f"{member.mention} is timed out until {pretty}.", ephemeral=True
         )
-
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(LFGModeration(bot))
