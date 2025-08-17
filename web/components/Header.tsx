@@ -15,6 +15,7 @@ export default function Header() {
           <Link href="/install" className="opacity-80 hover:opacity-100">Install</Link>
           <Link href="/privacy" className="opacity-80 hover:opacity-100">Privacy</Link>
           <Link href="/terms" className="opacity-80 hover:opacity-100">Terms</Link>
+          <Link href="/contact" className="opacity-80 hover:opacity-100">Contact</Link>
         </nav>
       </div>
     </header>
