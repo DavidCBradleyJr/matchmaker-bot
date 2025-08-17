@@ -1,7 +1,29 @@
+"use client";
+
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 import { MessageSquare, Users } from "lucide-react";
+
+/**
+ * Attempts to open the Discord app to a user's profile, falling back to the web profile.
+ * The web profile includes a "Message" button to start a DM.
+ */
+function openDM(userId: string) {
+  const appLink = `discord://-/users/${userId}`;
+  const webLink = `https://discord.com/users/${userId}`;
+  const start = Date.now();
+
+  // Try opening the app; if it doesn't switch focus quickly, fall back to web.
+  const fallback = setTimeout(() => {
+    if (Date.now() - start < 1500) {
+      window.open(webLink, "_blank");
+    }
+  }, 500);
+
+  window.location.href = appLink;
+  setTimeout(() => clearTimeout(fallback), 2000);
+}
 
 export default function ContactPage() {
   return (
@@ -46,9 +68,12 @@ export default function ContactPage() {
           foot="Availability may vary by timezone."
         >
           <a
-            href="https://discord.gg/7Cersw2kqv"
-            target="_blank"
-            rel="noopener noreferrer"
+            href="https://discord.com/users/154593850185351168"
+            onClick={(e) => {
+              e.preventDefault();
+              openDM("154593850185351168");
+            }}
+            aria-label="Open direct message with owner"
             className="inline-flex items-center justify-center rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-medium hover:bg-white/10"
           >
             Open Discord
