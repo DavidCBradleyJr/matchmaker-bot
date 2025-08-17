@@ -5,7 +5,7 @@ import sys
 import time
 import traceback
 
-# --- PRINT BEFORE ANY HEAVY IMPORTS (guaranteed visible in logs) ---
+# Early print so you always see *something* in Fly logs, even before logging config.
 print("[boot] process starting...", flush=True)
 
 import discord
@@ -14,11 +14,9 @@ from discord.ext import commands
 try:
     from . import config
 except Exception:
-    # If relative import fails because not run as module, this makes it obvious.
-    print("[boot] ERROR importing .config. Run with: python -m bot.main", flush=True)
+    print("[boot] ERROR importing .config. Ensure you launch with: python -m bot.main", flush=True)
     raise
 
-# Importing pool helpers can fail; don't let that kill startup silently.
 try:
     from .db import init_pool, get_allowed_guilds
 except Exception as e:
@@ -29,7 +27,7 @@ except Exception as e:
 
 BOOT_TS = time.time()
 
-# ---------- Logging (set ASAP) ----------
+# ---------- Logging ----------
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
     level=LOG_LEVEL,
@@ -55,7 +53,7 @@ class Bot(commands.Bot):
     async def setup_hook(self) -> None:
         _mark("setup_hook begin")
 
-        # 1) DB pool — never block Discord login
+        # 1) DB pool — never block gateway connect
         if getattr(config, "DATABASE_URL", None) and init_pool:
             try:
                 _mark("DB init_pool start")
@@ -66,7 +64,7 @@ class Bot(commands.Bot):
             except Exception:
                 logger.error("DB: init_pool FAILED\n%s", traceback.format_exc())
 
-        # 2) Load cogs — keep your develop list
+        # 2) Load cogs (keep your develop set)
         try:
             _mark("cogs load start")
             await self.load_extension("bot.cogs.allowlist")
@@ -94,7 +92,7 @@ class Bot(commands.Bot):
 bot = Bot()
 
 async def allowed_guilds() -> set[int]:
-    """DB-backed allowlist for staging; never block."""
+    """DB-backed allowlist for staging; never block startup."""
     if getattr(config, "ENVIRONMENT", "") != "staging":
         return set()
     try:
@@ -142,25 +140,18 @@ async def on_guild_join(guild: discord.Guild):
             except Exception:
                 logger.exception("Failed to leave %s (%s)", guild.name, guild.id)
 
-async def maybe_health_server():
-    """Start /healthz only if explicitly enabled. No dependency if disabled."""
-    if os.getenv("AIOHTTP", "0") != "1":
-        _mark("health server disabled (AIOHTTP env var != 1)")
-        return
-    try:
-        from aiohttp import web
-    except Exception as e:
-        logger.error("Health server requested but aiohttp import failed: %s", e)
-        return
+# ---------- Health server for Fly (HTTP checks) ----------
+async def run_health_server():
+    from aiohttp import web  # ensure aiohttp in requirements.txt
 
     async def health(_req):
         return web.Response(text="ok", status=200)
 
     app = web.Application()
-    app.add_routes([web.get("/health"), web.get("/healthz")])
+    app.add_routes([web.get("/health", health), web.get("/healthz", health)])
     runner = web.AppRunner(app)
     await runner.setup()
-    port = int(os.getenv("PORT", "8080"))
+    port = int(os.getenv("PORT", "8080"))  # Fly sets $PORT internally
     site = web.TCPSite(runner, host="0.0.0.0", port=port)
     await site.start()
     _mark(f"health server ON :{port} (/health,/healthz)")
@@ -175,8 +166,8 @@ async def main():
 
     try:
         await asyncio.gather(
-            maybe_health_server(),
-            bot.start(token),
+            run_health_server(),          # serve /health and /healthz for Fly
+            bot.start(token),             # connect to Discord
         )
     except Exception:
         logger.critical("bot.start raised\n%s", traceback.format_exc())
