@@ -1,3 +1,4 @@
+# bot/cogs/lfg_moderation.py
 from __future__ import annotations
 
 import logging
@@ -17,32 +18,105 @@ from bot.utils.timeouts import (
 
 log = logging.getLogger(__name__)
 
+# -------------------------------------------------------
+# Global guard used by ALL app commands (via setup())
+# -------------------------------------------------------
 async def slash_guard(interaction: discord.Interaction) -> bool:
     try:
         user = interaction.user
         guild_id = interaction.guild_id
         if not user or not guild_id:
             return True
+
+        # Block if the user is timed out in this guild
         if await is_user_timed_out(user.id, guild_id):
+            # Tell the user why it was blocked (ephemeral)
             if not interaction.response.is_done():
                 await interaction.response.send_message(
                     "You’re currently timed out from using the bot. Try again later.",
                     ephemeral=True,
                 )
             return False
+
         return True
     except Exception:
         log.exception("slash_guard failed")
+        # fail-open so we don't brick commands if guard crashes
         return True
 
+
 class LFGModeration(commands.Cog):
+    """Minimal moderation cog (timeouts) + global diagnostics for slash commands."""
+
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
 
     async def cog_load(self) -> None:
-        # Keep schema bootstrap; remove CommandTree check wiring (now done in setup()).
+        # Keep your schema bootstrap
         await ensure_schema()
 
+    # ------------------------------
+    # Global diagnostics (minimal)
+    # ------------------------------
+    @commands.Cog.listener()
+    async def on_interaction(self, interaction: discord.Interaction):
+        try:
+            # This confirms whether the bot SEES the interaction at all
+            cmd = getattr(interaction, "command", None)
+            qn = getattr(cmd, "qualified_name", None)
+            log.info(
+                "interaction: type=%s user=%s guild=%s channel=%s cmd=%s responded=%s",
+                getattr(interaction.type, "name", interaction.type),
+                getattr(interaction.user, "id", None),
+                interaction.guild_id,
+                getattr(interaction.channel, "id", None),
+                qn,
+                interaction.response.is_done(),
+            )
+        except Exception:
+            log.exception("on_interaction logger failed")
+
+    @commands.Cog.listener()
+    async def on_app_command_completion(self, interaction: discord.Interaction, command: app_commands.Command):
+        try:
+            log.info(
+                "app_command_completed: %s by user=%s guild=%s",
+                command.qualified_name,
+                getattr(interaction.user, "id", None),
+                interaction.guild_id,
+            )
+        except Exception:
+            log.exception("on_app_command_completion logger failed")
+
+    @commands.Cog.listener()
+    async def on_app_command_error(self, interaction: discord.Interaction, error: Exception):
+        # One place to see *why* a slash command failed (any cog)
+        log.exception(
+            "app_command_error for cmd=%s user=%s guild=%s",
+            getattr(getattr(interaction, "command", None), "qualified_name", "?"),
+            getattr(interaction.user, "id", None),
+            interaction.guild_id,
+            exc_info=error,
+        )
+        # Make sure the user gets feedback
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "⚠️ That command failed. The error has been logged.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.followup.send(
+                    "⚠️ That command failed. The error has been logged.",
+                    ephemeral=True,
+                )
+        except Exception:
+            # Don't raise from error handler
+            log.exception("failed to send error followup")
+
+    # ------------------------------
+    # Admin timeout helpers (unchanged)
+    # ------------------------------
     async def is_admin(self, interaction: discord.Interaction) -> bool:
         if not interaction.user or not interaction.guild:
             return False
@@ -118,8 +192,12 @@ class LFGModeration(commands.Cog):
             f"{member.mention} is timed out until {pretty}.", ephemeral=True
         )
 
+
+# -------------------------------------------------------
+# Extension setup: register GLOBAL interaction check
+# -------------------------------------------------------
 async def setup(bot: commands.Bot) -> None:
-    # Register a GLOBAL interaction check for all app commands.
+    # Global interaction check for ALL app commands
     @bot.tree.interaction_check
     async def _global_interaction_check(interaction: discord.Interaction) -> bool:
         return await slash_guard(interaction)
