@@ -1,15 +1,33 @@
-app = "matchmaker-site"
+app = "matchmaker-prod-bot"
 primary_region = "iad"
 
 [build]
   dockerfile = "Dockerfile"
 
-[http_service]
-  internal_port = 3000
-  force_https = true
-  auto_start_machines = true
-  auto_stop_machines = true
-  min_machines_running = 0
-
 [processes]
   app = "python -m bot.main"
+
+[http_service]
+  internal_port = 8080
+  processes = ["app"]
+  force_https = true
+  auto_start_machines = true
+  auto_stop_machines = false
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = "connections"
+    hard_limit = 25
+    soft_limit = 20
+
+  [[http_service.checks]]
+    interval = "15s"
+    timeout = "2s"
+    grace_period = "10s"
+    method = "GET"
+    path = "/health"
+
+[[vm]]
+  memory = "1gb"
+  cpu_kind = "shared"
+  cpus = 1
