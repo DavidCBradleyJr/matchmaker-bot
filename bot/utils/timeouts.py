@@ -1,10 +1,11 @@
+# bot/utils/timeouts.py
 """
-Timeout store backed by Neon/PostgreSQL (asyncpg).
+Neon/Postgres-backed timeouts with asyncpg using your existing DB pool.
 
-Schema (created on import via ensure_schema()):
+Schema:
   CREATE TABLE IF NOT EXISTS user_timeouts (
-      user_id   BIGINT    NOT NULL,
-      guild_id  BIGINT    NOT NULL,
+      user_id    BIGINT      NOT NULL,
+      guild_id   BIGINT      NOT NULL,
       expires_at TIMESTAMPTZ NOT NULL,
       PRIMARY KEY (user_id, guild_id)
   );
@@ -22,48 +23,61 @@ from __future__ import annotations
 import time
 from typing import Optional
 
-# >>> If your pool helpers are elsewhere, change this one import only <<<
-from bot.db import get_pool  # must expose an initialized asyncpg.Pool
+# Your repo already defines the asyncpg pool in bot/db.py.
+# We support either get_pool() or a module-level pool attribute to match your code.
+try:
+    from bot.db import get_pool  # preferred
+except Exception:
+    get_pool = None  # type: ignore
+
+try:
+    # Fallback: some repos expose `pool` directly
+    from bot import db as _dbmod  # type: ignore
+except Exception:
+    _dbmod = None  # type: ignore
 
 
-# ---- schema bootstrapping ----
+def _pool():
+    if get_pool is not None:
+        return get_pool()
+    if _dbmod is not None and hasattr(_dbmod, "pool") and _dbmod.pool is not None:
+        return _dbmod.pool
+    raise RuntimeError("DB pool not initialized. Ensure bot/db.py created the asyncpg pool before loading cogs.")
 
-_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS user_timeouts (
-    user_id    BIGINT       NOT NULL,
-    guild_id   BIGINT       NOT NULL,
-    expires_at TIMESTAMPTZ  NOT NULL,
-    PRIMARY KEY (user_id, guild_id)
-);
-CREATE INDEX IF NOT EXISTS idx_user_timeouts_guild_exp
-    ON user_timeouts (guild_id, expires_at);
-"""
 
-# lightweight guard to avoid racing multiple CREATEs on hot-reload
+_SCHEMA_SQL = [
+    """
+    CREATE TABLE IF NOT EXISTS user_timeouts (
+        user_id    BIGINT      NOT NULL,
+        guild_id   BIGINT      NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (user_id, guild_id)
+    )
+    """,
+    # Helpful index for dashboards/maintenance; harmless if unused
+    "CREATE INDEX IF NOT EXISTS idx_user_timeouts_guild_exp ON user_timeouts (guild_id, expires_at)",
+]
+
 _schema_ready = False
 
 
 async def ensure_schema() -> None:
+    """Create the table/index once. Safe to call multiple times."""
     global _schema_ready
     if _schema_ready:
         return
-    pool = get_pool()
+    pool = _pool()
     async with pool.acquire() as conn:
-        # asyncpg executes only the first statement in .execute by default;
-        # use conn.execute on each statement manually.
-        for stmt in filter(None, (s.strip() for s in _SCHEMA_SQL.split(";"))):
+        for stmt in _SCHEMA_SQL:
             await conn.execute(stmt)
     _schema_ready = True
 
 
-# ---- core helpers ----
-
 async def is_user_timed_out(user_id: int, guild_id: int) -> bool:
     """
-    True if (user_id, guild_id) has a non-expired row in user_timeouts.
-    Auto-clears if expired.
+    True if a non-expired timeout exists. Auto-clears if expired.
     """
-    pool = get_pool()
+    pool = _pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT EXTRACT(EPOCH FROM expires_at)::BIGINT AS exp "
@@ -72,7 +86,6 @@ async def is_user_timed_out(user_id: int, guild_id: int) -> bool:
         )
     if not row:
         return False
-
     exp = int(row["exp"])
     now = int(time.time())
     if exp <= now:
@@ -82,10 +95,7 @@ async def is_user_timed_out(user_id: int, guild_id: int) -> bool:
 
 
 async def get_timeout_expiry(user_id: int, guild_id: int) -> Optional[int]:
-    """
-    Returns the Unix epoch seconds for expiry, or None if not present.
-    """
-    pool = get_pool()
+    pool = _pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT EXTRACT(EPOCH FROM expires_at)::BIGINT AS exp "
@@ -99,9 +109,10 @@ async def get_timeout_expiry(user_id: int, guild_id: int) -> Optional[int]:
 
 async def set_timeout(user_id: int, guild_id: int, minutes: int) -> None:
     """
-    Upsert a timeout. minutes<=0 means 'now' (you probably want clear_timeout instead).
+    Upsert timeout to NOW + minutes.
     """
-    pool = get_pool()
+    minutes = max(0, int(minutes))
+    pool = _pool()
     async with pool.acquire() as conn:
         await conn.execute(
             """
@@ -110,12 +121,12 @@ async def set_timeout(user_id: int, guild_id: int, minutes: int) -> None:
             ON CONFLICT (user_id, guild_id)
             DO UPDATE SET expires_at = EXCLUDED.expires_at
             """,
-            user_id, guild_id, max(0, int(minutes)),
+            user_id, guild_id, minutes,
         )
 
 
 async def clear_timeout(user_id: int, guild_id: int) -> None:
-    pool = get_pool()
+    pool = _pool()
     async with pool.acquire() as conn:
         await conn.execute(
             "DELETE FROM user_timeouts WHERE user_id=$1 AND guild_id=$2",

@@ -21,14 +21,15 @@ log = logging.getLogger(__name__)
 
 async def slash_guard(interaction: discord.Interaction) -> bool:
     """
-    Global guard that enforces Neon-backed timeouts.
-    Fail-open on internal errors so the bot doesn't brick.
+    Global guard enforcing Neon-backed timeouts.
+    Fail-open on internal errors to avoid bricking the bot.
     """
     try:
         user = interaction.user
         guild_id = interaction.guild_id
         if not user or not guild_id:
-            return True  # allow DMs/unknown
+            return True  # allow DMs/unknown contexts
+
         if await is_user_timed_out(user.id, guild_id):
             if not interaction.response.is_done():
                 await interaction.response.send_message(
@@ -36,34 +37,36 @@ async def slash_guard(interaction: discord.Interaction) -> bool:
                     ephemeral=True,
                 )
             return False
+
         return True
-    except Exception as e:
-        log.exception("slash_guard error: %s", e)
-        return True  # fail-open
+    except Exception:
+        log.exception("slash_guard failed")
+        return True
 
 
 class LFGModeration(commands.Cog):
     """
-    LFG moderation helpers + timeout admin commands (Neon-backed).
-    We install the global app-command check here once on cog_load.
+    LFG moderation helpers + admin timeout commands.
+
+    - Schema is created on cog load.
+    - Global slash guard installed ONCE using public API: CommandTree.add_check.
     """
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
 
     async def cog_load(self) -> None:
-        # Ensure table exists before any commands/guard run
+        # Ensure Neon schema exists before we install the guard and expose commands
         await ensure_schema()
 
-        # Install the guard once (public API; NOT touching private attrs)
+        # Install the global app-command guard exactly once (no private attributes!)
         if not getattr(self.bot, "_slash_guard_installed", False):
-            # CommandTree.add_check is the supported API for global app-command checks
             self.bot.tree.add_check(slash_guard)
             setattr(self.bot, "_slash_guard_installed", True)
-            log.info("Installed global slash guard (timeouts via Neon).")
+            log.info("Installed global slash guard (Neon timeouts).")
 
     async def cog_unload(self) -> None:
-        # Optional: remove guard if you hot-reload cogs
+        # Optional cleanup for hot-reload workflows
         try:
             self.bot.tree.remove_check(slash_guard)
             setattr(self.bot, "_slash_guard_installed", False)
@@ -71,7 +74,7 @@ class LFGModeration(commands.Cog):
         except Exception:
             pass
 
-    # ---- helper gate for admin-only controls ----
+    # --- Admin helper ---
     async def is_admin(self, interaction: discord.Interaction) -> bool:
         if not interaction.user or not interaction.guild:
             return False
@@ -84,11 +87,11 @@ class LFGModeration(commands.Cog):
             )
         return ok
 
-    # ---- commands ----
+    # --- Commands ---
 
     @app_commands.command(
         name="lfg-timeout",
-        description="Timeout or clear a user's timeout from using the bot."
+        description="Timeout (or clear) a user's ability to use the bot."
     )
     @app_commands.describe(
         member="The member to (un)timeout",
@@ -129,7 +132,7 @@ class LFGModeration(commands.Cog):
         name="lfg-timeout-status",
         description="Check if a user is timed out from using the bot."
     )
-    @app_commands.describe(member="The member to check (defaults to you).")
+    @app_commands.describe(member="Member to check (defaults to you)")
     async def lfg_timeout_status(
         self,
         interaction: discord.Interaction,
