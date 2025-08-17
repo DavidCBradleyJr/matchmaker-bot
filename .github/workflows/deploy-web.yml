@@ -6,6 +6,9 @@ on:
     paths:
       - "web/**"
       - ".github/workflows/deploy-web.yml"
+      - "web/fly.*.toml"
+      - "fly.*.toml"
+  workflow_dispatch: {}
 
 jobs:
   deploy:
