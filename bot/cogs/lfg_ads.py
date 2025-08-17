@@ -52,7 +52,7 @@ async def safe_ack(
 # ---------------------
 
 class ConnectButton(ui.View):
-    def __init__(self, ad_id: int, timeout: float | None = 600):
+    def __init__(self, ad_id: int, *, timeout: float | None = 1800):
         super().__init__(timeout=timeout)
         self.ad_id = ad_id
 
@@ -69,62 +69,38 @@ class ConnectButton(ui.View):
             ad = await conn.fetchrow(
                 """
                 UPDATE lfg_ads
-                SET status = 'connected'
-                WHERE id = $1 AND status = 'active'
+                SET status = 'connected', connector_id = $1, connector_name = $2
+                WHERE id = $3 AND status = 'open'
                 RETURNING id, author_id, author_name, game, platform, region, notes
                 """,
+                int(user.id),
+                str(user),
                 self.ad_id,
             )
 
-            if not ad:
-                # Already connected/closed or missing
-                if acked:
-                    try:
-                        await interaction.followup.send("Sorry, this ad is no longer active.", ephemeral=True)
-                    except (discord.NotFound, discord.HTTPException):
-                        pass
-                return
+        if not ad:
+            if acked:
+                try:
+                    await interaction.followup.send(
+                        "Someone already connected with this ad. Try another one!", ephemeral=True
+                    )
+                except (discord.NotFound, discord.HTTPException):
+                    pass
+            return
 
-            # Don't allow author to connect to themselves
-            if int(ad["author_id"]) == user.id:
-                # Roll back to active so someone else can click
-                await conn.execute(
-                    "UPDATE lfg_ads SET status='active' WHERE id=$1 AND status='connected'",
-                    self.ad_id,
-                )
-                if acked:
-                    try:
-                        await interaction.followup.send("You can’t connect to your own ad.", ephemeral=True)
-                    except (discord.NotFound, discord.HTTPException):
-                        pass
-                return
-
-        # Try to DM both sides; ignore per-user DM failures
-        owner_user: discord.User | None = None
-        try:
-            owner_user = interaction.client.get_user(int(ad["author_id"])) or await interaction.client.fetch_user(
-                int(ad["author_id"])
-            )
-        except Exception:
-            owner_user = None
-
+        # DM both parties
+        owner_id = int(ad["author_id"])
         owner_msg = (
-            f"🎮 **Someone is interested in your LFG ad!**\n"
-            f"- Game: **{ad['game']}**\n"
-            f"- Platform: {ad['platform'] or 'n/a'}\n"
-            f"- Region: {ad['region'] or 'n/a'}\n"
-            f"- Notes: {ad['notes'] or '—'}\n\n"
-            f"**Interested player:** {user.mention} ({user})"
+            f"✅ Someone is interested in your **{ad['game']}** ad (#{self.ad_id}).\n"
+            f"Connector: {user.mention}"
         )
         clicker_msg = (
-            f"🎮 **You connected to an LFG ad!**\n"
-            f"- Game: **{ad['game']}**\n"
-            f"- Platform: {ad['platform'] or 'n/a'}\n"
-            f"- Region: {ad['region'] or 'n/a'}\n"
-            f"- Notes: {ad['notes'] or '—'}\n\n"
-            f"**Ad owner:** <@{ad['author_id']}>"
+            f"✅ I connected you with **{ad['author_name']}** for **{ad['game']}**.\n"
+            f"Start a chat here: <@{owner_id}>"
         )
 
+        # Try to fetch owner and DM
+        owner_user = interaction.client.get_user(owner_id) or await interaction.client.fetch_user(owner_id)
         if owner_user:
             try:
                 await owner_user.send(owner_msg)
@@ -175,7 +151,8 @@ class LfgAds(commands.Cog):
         - Broadcast embed + Connect button to all configured guild channels
         - Follow up to the author (only if ack succeeded)
         """
-        acked = await safe_ack(interaction, message=None, ephemeral=True, use_thinking=True)
+        # IMPORTANT: don't show the "thinking..." bubble; we only want one final response
+        acked = await safe_ack(interaction, message=None, ephemeral=True, use_thinking=False)
 
         pool = get_pool()
 
@@ -183,11 +160,11 @@ class LfgAds(commands.Cog):
         async with pool.acquire() as conn:
             ad_id = await conn.fetchval(
                 """
-                INSERT INTO lfg_ads (author_id, author_name, game, platform, region, notes)
-                VALUES ($1,$2,$3,$4,$5,$6)
+                INSERT INTO lfg_ads (author_id, author_name, game, platform, region, notes, status)
+                VALUES ($1, $2, $3, $4, $5, $6, 'open')
                 RETURNING id
                 """,
-                interaction.user.id,
+                int(interaction.user.id),
                 str(interaction.user),
                 game,
                 platform,
@@ -195,13 +172,17 @@ class LfgAds(commands.Cog):
                 notes,
             )
 
+            title_bits = [game]
+            if platform:
+                title_bits.append(f"• {platform}")
+            if region:
+                title_bits.append(f"• {region}")
+
             embed = discord.Embed(
-                title=f"LFG: {game}",
-                description=notes or "—",
+                title=" ".join(title_bits),
+                description=notes or "Looking for teammates!",
                 color=discord.Color.blurple(),
             )
-            embed.add_field(name="Platform", value=platform or "n/a", inline=True)
-            embed.add_field(name="Region", value=region or "n/a", inline=True)
             embed.set_author(
                 name=str(interaction.user),
                 icon_url=interaction.user.display_avatar.url,
@@ -220,35 +201,23 @@ class LfgAds(commands.Cog):
             guild = self.bot.get_guild(int(row["guild_id"]))
             if not guild:
                 continue
-            channel = guild.get_channel(int(row["lfg_channel_id"])) if guild else None
-            if not isinstance(channel, discord.TextChannel):
+
+            channel = guild.get_channel(int(row["lfg_channel_id"]))
+            if not channel or not isinstance(channel, discord.TextChannel):
                 continue
 
             try:
-                msg = await channel.send(embed=embed, view=view)
+                await channel.send(embed=embed, view=view)
                 posted += 1
-                # Persist the post reference
-                async with pool.acquire() as conn:
-                    await conn.execute(
-                        """
-                        INSERT INTO lfg_posts (ad_id, guild_id, channel_id, message_id)
-                        VALUES ($1,$2,$3,$4)
-                        ON CONFLICT DO NOTHING
-                        """,
-                        ad_id,
-                        guild.id,
-                        channel.id,
-                        msg.id,
-                    )
             except discord.Forbidden:
-                # Missing permissions in that channel — skip
+                # Missing perms in that channel — skip
                 continue
-            except Exception:
-                # Don’t let one server break the whole broadcast
+            except discord.HTTPException:
+                # Some other send failure — skip
                 continue
 
+        # Tell the author what happened (only if we acked)
         if acked:
-            # Only try to follow up if we successfully acknowledged earlier
             try:
                 if posted == 0:
                     await interaction.followup.send(
