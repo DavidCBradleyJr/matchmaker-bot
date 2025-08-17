@@ -12,8 +12,14 @@ from ..db import get_pool
 # Config
 # ---------------------
 
-# How long we're willing to wait for posting the ad and broadcasting to channels
-POST_TIMEOUT_SECONDS = 15
+# Overall time we allow for inserting + broadcasting the ad before showing a timeout to the user.
+POST_TIMEOUT_SECONDS = 60
+
+# Max concurrent channel sends to avoid rate-limit spikes
+MAX_SEND_CONCURRENCY = 5
+
+# Per-channel send timeout (seconds)
+PER_SEND_TIMEOUT = 8
 
 
 # ---------------------
@@ -182,14 +188,12 @@ class LfgAds(commands.Cog):
         """
         Flow:
         - Send an immediate ephemeral "Posting your ad…" (visible, not a spinner)
-        - Within a timeout, insert ad + broadcast to configured guild channels
+        - Within a timeout, insert ad + broadcast to configured guild channels (concurrent with a cap)
         - Edit the original message to the final result (success or guidance)
         """
         # Send the initial message (so deploy interrupts don't leave a spinner)
         acked = await safe_ack(interaction, message="Posting your ad…", ephemeral=True, use_thinking=False)
-
         if not acked:
-            # If we couldn't ack, there's nothing safe to edit later
             return
 
         async def do_post_work() -> tuple[int, list[tuple[str, str]]]:
@@ -234,47 +238,50 @@ class LfgAds(commands.Cog):
 
             view = ConnectButton(ad_id=ad_id)
 
-            posted = 0
+            sem = asyncio.Semaphore(MAX_SEND_CONCURRENCY)
             jump_links: list[tuple[str, str]] = []  # (server_name, jump_url)
+            posted_count = 0
 
-            for row in rows:
-                guild = self.bot.get_guild(int(row["guild_id"]))
+            async def send_one(guild_id: int, channel_id: int) -> tuple[bool, tuple[str, str] | None]:
+                guild = self.bot.get_guild(guild_id)
                 if not guild:
-                    continue
-
-                channel = guild.get_channel(int(row["lfg_channel_id"]))
+                    return False, None
+                channel = guild.get_channel(channel_id)
                 if not isinstance(channel, discord.TextChannel):
-                    continue
+                    return False, None
 
-                try:
-                    msg = await channel.send(embed=embed, view=view)
-                    posted += 1
-                    if len(jump_links) < 3:
-                        jump_links.append((guild.name, msg.jump_url))
-                except discord.Forbidden:
-                    continue
-                except discord.HTTPException:
-                    continue
+                async with sem:
+                    try:
+                        msg = await asyncio.wait_for(channel.send(embed=embed, view=view), timeout=PER_SEND_TIMEOUT)
+                        return True, (guild.name, msg.jump_url)
+                    except (discord.Forbidden, discord.HTTPException, asyncio.TimeoutError):
+                        return False, None
 
-            return posted, jump_links
+            tasks = [
+                asyncio.create_task(send_one(int(r["guild_id"]), int(r["lfg_channel_id"])))
+                for r in rows
+            ]
+
+            for coro in asyncio.as_completed(tasks):
+                ok, info = await coro
+                if ok:
+                    posted_count += 1
+                    if info and len(jump_links) < 3:
+                        jump_links.append(info)
+
+            return posted_count, jump_links
 
         try:
-            posted, jump_links = await asyncio.wait_for(
-                do_post_work(),
-                timeout=POST_TIMEOUT_SECONDS,
-            )
+            posted, jump_links = await asyncio.wait_for(do_post_work(), timeout=POST_TIMEOUT_SECONDS)
         except asyncio.TimeoutError:
             try:
                 await interaction.edit_original_response(
-                    content=(
-                        "⏳ Timed out while posting your ad. Please try again."
-                    )
+                    content="⏳ Timed out while posting your ad. Please try again."
                 )
             except Exception:
                 pass
             return
         except Exception:
-            # Generic fallback
             try:
                 await interaction.edit_original_response(
                     content="Something went wrong while posting your ad. Please try again."
@@ -295,7 +302,6 @@ class LfgAds(commands.Cog):
             else:
                 link_lines = [f"{i}. **{server}** — {url}" for i, (server, url) in enumerate(jump_links, start=1)]
                 more = f"\n…and **{posted - len(jump_links)}** more." if posted > len(jump_links) else ""
-
                 await interaction.edit_original_response(
                     content=(
                         "✅ Your ad was posted!"
