@@ -148,9 +148,8 @@ class Bot(commands.Bot):
             await self.load_extension("bot.cogs.allowlist")
             await self.load_extension("bot.cogs.status")
             await self.load_extension("bot.cogs.guild_settings")
-            await self.load_extension("bot.cogs.lfg_ads")          # <-- defines /lfg group
+            await self.load_extension("bot.cogs.lfg_ads")          # defines /lfg group
             await self.load_extension("bot.cogs.lfg_moderation")
-            await self.load_extension("bot.cogs.ad_interactions")
             _mark("cogs load OK")
         except Exception:
             logger.error("Cog load failed\n%s", traceback.format_exc())
@@ -208,20 +207,16 @@ async def on_ready():
                 except Exception:
                     logger.exception("Failed to leave %s (%s)", g.name, g.id)
 
-    # -------------------------------
-    # NEW: Per‑guild slash sync pass
-    # Registers any commands that were decorated with @app_commands.guilds(...)
-    # or otherwise only attach on a guild-bound tree.
-    # -------------------------------
+    # Per-guild slash sync (register any guild-scoped commands, e.g., /lfg)
     try:
         total = 0
         for g in bot.guilds:
             cmds = await bot.tree.sync(guild=g)
             total += len(cmds)
             _mark(f"guild slash sync OK (guild={g.id}, count={len(cmds)})")
-        _mark(f"per‑guild slash sync summary: total={total} across {len(bot.guilds)} guild(s)")
+        _mark(f"per-guild slash sync summary: total={total} across {len(bot.guilds)} guild(s)")
     except Exception:
-        logger.error("Per‑guild slash sync failed\n%s", traceback.format_exc())
+        logger.error("Per-guild slash sync failed\n%s", traceback.format_exc())
 
 @bot.event
 async def on_guild_join(guild: discord.Guild):
@@ -240,7 +235,7 @@ async def on_guild_join(guild: discord.Guild):
         cmds = await bot.tree.sync(guild=guild)
         _mark(f"joined guild sync OK (guild={guild.id}, count={len(cmds)})")
     except Exception:
-        logger.error("on_guild_join per‑guild sync failed\n%s", traceback.format_exc())
+        logger.error("on_guild_join per-guild sync failed\n%s", traceback.format_exc())
 
 # ---------- Entrypoint ----------
 async def main():
