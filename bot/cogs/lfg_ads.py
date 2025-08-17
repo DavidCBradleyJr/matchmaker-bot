@@ -1,4 +1,3 @@
-# bot/cogs/lfg_ads.py
 from __future__ import annotations
 
 import asyncio
@@ -18,7 +17,6 @@ from ..db import get_pool
 
 LOGGER = logging.getLogger("lfg_ads")
 if not LOGGER.handlers:
-    # Basic handler if none configured globally
     h = logging.StreamHandler()
     fmt = logging.Formatter("[%(asctime)s] %(levelname)s lfg_ads: %(message)s")
     h.setFormatter(fmt)
