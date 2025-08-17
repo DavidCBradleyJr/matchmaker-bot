@@ -1,169 +1,141 @@
 # bot/main.py
-import os
-import sys
 import asyncio
 import logging
-import time
+import os
+import sys
 import traceback
 
 import discord
-from discord import app_commands
 from discord.ext import commands
 
+from . import config
+from .db import init_pool, get_allowed_guilds
 
-try:
-    from bot.db import init_pool
-except Exception:  # pragma: no cover
-    init_pool = None  # type: ignore
+# ---------- Logging ----------
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=LOG_LEVEL,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    stream=sys.stdout,
+)
+logger = logging.getLogger("bot")
 
-START_TS = time.time()
-
-def log_setup():
-    level = os.getenv("LOG_LEVEL", "INFO").upper()
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-        stream=sys.stdout,
-    )
-    logging.getLogger("asyncio").setLevel(logging.WARNING)
-
-log_setup()
-log = logging.getLogger("matchmaker-bot")
-
-
-# ---------- Global Slash Guard ----------
-async def slash_guard(interaction: discord.Interaction) -> bool:
-    try:
-        from bot.utils.timeouts import is_user_timed_out  # Neon-backed
-        user = interaction.user
-        gid = interaction.guild_id
-        if not user or not gid:
-            return True
-        if await is_user_timed_out(user.id, gid):
-            if not interaction.response.is_done():
-                await interaction.response.send_message(
-                    "You’re currently timed out from using the bot. Try again later.",
-                    ephemeral=True,
-                )
-            return False
-    except Exception:
-        log.error("slash_guard failed:\n%s", traceback.format_exc())
-        return True  # fail-open
-    return True
-
-
-class GuardedTree(app_commands.CommandTree):
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return await slash_guard(interaction)
-
+# ---------- Intents ----------
+INTENTS = discord.Intents.default()
+INTENTS.guilds = True
+INTENTS.members = False  # keep off unless you actually need it
 
 class Bot(commands.Bot):
     def __init__(self) -> None:
-        intents = discord.Intents.default()
-        intents.guilds = True
-        intents.members = True
-        # Keep message content off unless you need it:
-        intents.message_content = False
-
-        super().__init__(
-            command_prefix=os.getenv("BOT_PREFIX", "!"),
-            intents=intents,
-            tree_cls=GuardedTree,
-        )
-
-        self._startup_marks = []
-
-    def _mark(self, msg: str):
-        now = time.time() - START_TS
-        self._startup_marks.append(f"+{now:05.2f}s {msg}")
-        log.info(msg)
+        super().__init__(command_prefix="!", intents=INTENTS, application_id=None)
 
     async def setup_hook(self) -> None:
-        self._mark("setup_hook: begin")
-
-        # 1) Init Neon pool (bounded). If it takes too long, warn and continue.
-        if init_pool:
+        # 1) DB pool (don’t let it brick Discord login if Neon is slow/misconfigured)
+        if config.DATABASE_URL:
             try:
-                self._mark("DB: init_pool start")
-                await asyncio.wait_for(init_pool(os.getenv("DATABASE_URL")), timeout=8.0)
-                self._mark("DB: init_pool OK")
+                logger.info("DB: init_pool start")
+                await asyncio.wait_for(init_pool(config.DATABASE_URL), timeout=10.0)
+                logger.info("DB: init_pool OK")
             except asyncio.TimeoutError:
-                log.error("DB: init_pool timed out after 8s (continuing; bot will still connect)")
+                logger.error("DB: init_pool timed out after 10s — continuing without DB")
             except Exception:
-                log.error("DB: init_pool failed:\n%s", traceback.format_exc())
+                logger.error("DB: init_pool failed\n%s", traceback.format_exc())
 
-        # 2) Ensure timeout schema (bounded). Don’t let it block Discord connect.
+        # 2) Load cogs (keep your existing list)
         try:
-            self._mark("Timeouts: ensure_schema start")
-            from bot.utils.timeouts import ensure_schema
-            await asyncio.wait_for(ensure_schema(), timeout=5.0)
-            self._mark("Timeouts: ensure_schema OK")
+            # await self.load_extension("bot.cogs.lfg")
+            await self.load_extension("bot.cogs.allowlist")
+            await self.load_extension("bot.cogs.status")
+            await self.load_extension("bot.cogs.guild_settings")
+            await self.load_extension("bot.cogs.lfg_ads")
+            await self.load_extension("bot.cogs.lfg_moderation")
+            await self.load_extension("bot.cogs.ad_interactions")
+            logger.info("Cogs loaded")
+        except Exception:
+            logger.error("Failed loading cogs\n%s", traceback.format_exc())
+
+        try:
+            synced = await asyncio.wait_for(self.tree.sync(), timeout=20.0)
+            logger.info("Slash command sync complete (count=%d)", len(synced))
         except asyncio.TimeoutError:
-            log.error("Timeouts: ensure_schema timed out after 5s (continuing)")
+            logger.error("Slash command sync timed out — continuing")
         except Exception:
-            log.error("Timeouts: ensure_schema failed:\n%s", traceback.format_exc())
+            logger.error("Slash command sync failed\n%s", traceback.format_exc())
 
-        # 3) Load cogs (bounded per-cog)
-        try:
-            self._mark("Cog load: bot.cogs.lfg_moderation start")
-            await asyncio.wait_for(self.load_extension("bot.cogs.lfg_moderation"), timeout=5.0)
-            self._mark("Cog load: bot.cogs.lfg_moderation OK")
-        except asyncio.TimeoutError:
-            log.error("Cog load: lfg_moderation timed out (continuing)")
-        except Exception:
-            log.error("Cog load: lfg_moderation failed:\n%s", traceback.format_exc())
+bot = Bot()
 
-        # 4) Register a quick health command
-        @self.tree.command(name="ping", description="Health check")
-        async def ping(interaction: discord.Interaction):
-            await interaction.response.send_message("Pong!", ephemeral=True)
-
-        # 5) Sync in setup_hook (safe); bounded but non-fatal
-        try:
-            test_guild_id = os.getenv("TEST_GUILD_ID")
-            if test_guild_id:
-                guild = discord.Object(id=int(test_guild_id))
-                synced = await asyncio.wait_for(self.tree.sync(guild=guild), timeout=10.0)
-                self._mark(f"Command sync: {len(synced)} to guild {test_guild_id}")
-            else:
-                synced = await asyncio.wait_for(self.tree.sync(), timeout=15.0)
-                self._mark(f"Command sync: global {len(synced)}")
-        except asyncio.TimeoutError:
-            log.error("Command sync timed out (continuing)")
-        except Exception:
-            log.error("Command sync failed:\n%s", traceback.format_exc())
-
-        self._mark("setup_hook: end")
-
-    async def on_ready(self) -> None:
-        self._mark(f"Connected to Discord as {self.user} | Guilds={len(self.guilds)}")
-        try:
-            await self.change_presence(activity=discord.Game(name="/ping"), status=discord.Status.online)
-        except Exception:
-            log.warning("Presence update failed:\n%s", traceback.format_exc())
-
-        # Dump startup timeline for post-mortem clarity
-        log.info("Startup timeline:\n%s", "\n".join(self._startup_marks))
-
-
-async def _run() -> None:
-    token = os.getenv("DISCORD_TOKEN")
-    if not token:
-        raise RuntimeError("DISCORD_TOKEN not set")
-
-    bot = Bot()
-    # Start the gateway; any pre-connect stalls will be visible from setup_hook marks
+async def allowed_guilds() -> set[int]:
+    """Return the set of guild IDs allowed for STAGING. Empty set = allow no one."""
+    if config.ENVIRONMENT != "staging":
+        return set()
+    # Prefer DB-backed allowlist if pool is up; otherwise fall back to static list
     try:
-        log.info("Starting Discord bot ...")
-        await bot.start(token)
+        if config.DATABASE_URL:
+            return await get_allowed_guilds("staging")
     except Exception:
-        log.critical("bot.start() raised:\n%s", traceback.format_exc())
-        raise
+        logger.error("Failed to fetch allowed guilds from DB\n%s", traceback.format_exc())
+    return set(config.STAGING_ALLOWED_GUILDS or [])
 
+@bot.event
+async def on_ready():
+    user = f"{bot.user} ({getattr(bot.user, 'id', '?')})" if bot.user else "unknown"
+    logger.info("Logged in as %s | Guilds=%d", user, len(bot.guilds))
 
-def main() -> None:
-    asyncio.run(_run())
+    # Presence
+    status_text = config.STAGING_STATUS if config.ENVIRONMENT == "staging" else config.PROD_STATUS
+    try:
+        await bot.change_presence(activity=discord.Game(name=status_text))
+    except Exception:
+        logger.exception("Failed to set presence")
 
+    # STAGING: deny-by-default — leave any non-allowed guilds
+    if config.ENVIRONMENT == "staging":
+        allowed = await allowed_guilds()
+        logger.info("Staging allowlist (count=%d): %s", len(allowed), sorted(list(allowed)))
+        for g in list(bot.guilds):
+            if g.id not in allowed:
+                logger.warning("Leaving unauthorized guild: %s (%s)", g.name, g.id)
+                try:
+                    await g.leave()
+                except Exception:
+                    logger.exception("Failed to leave %s (%s)", g.name, g.id)
+
+@bot.event
+async def on_guild_join(guild: discord.Guild):
+    # STAGING: deny-by-default on any new join
+    if config.ENVIRONMENT == "staging":
+        allowed = await allowed_guilds()
+        if guild.id not in allowed:
+            logger.warning("Invited to unauthorized guild: %s (%s). Leaving.", guild.name, guild.id)
+            try:
+                await guild.leave()
+            except Exception:
+                logger.exception("Failed to leave %s (%s)", guild.name, guild.id)
+
+# ---------- Fly health server (keeps platform happy) ----------
+async def run_health_server():
+    from aiohttp import web
+
+    async def health(_req):
+        return web.Response(text="ok", status=200)
+
+    app = web.Application()
+    app.add_routes([web.get("/health", health), web.get("/healthz", health)])
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", "8080"))
+    site = web.TCPSite(runner, host="0.0.0.0", port=port)
+    await site.start()
+    logger.info("Health server started on :%d (/health,/healthz)", port)
+
+# ---------- Entrypoint ----------
+async def main():
+    if not config.DISCORD_TOKEN:
+        raise RuntimeError("DISCORD_TOKEN is not set")
+    await asyncio.gather(
+        run_health_server(),
+        bot.start(config.DISCORD_TOKEN),
+    )
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
