@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import logging
 from typing import Optional
 
@@ -39,19 +40,8 @@ class LFGModeration(commands.Cog):
         self.bot = bot
 
     async def cog_load(self) -> None:
+        # Keep schema bootstrap; remove CommandTree check wiring (now done in setup()).
         await ensure_schema()
-        if not getattr(self.bot, "_slash_guard_installed", False):
-            self.bot.tree.add_check(slash_guard)
-            setattr(self.bot, "_slash_guard_installed", True)
-            log.info("Installed global slash guard (timeouts).")
-
-    async def cog_unload(self) -> None:
-        try:
-            self.bot.tree.remove_check(slash_guard)
-            setattr(self.bot, "_slash_guard_installed", False)
-            log.info("Removed global slash guard.")
-        except Exception:
-            pass
 
     async def is_admin(self, interaction: discord.Interaction) -> bool:
         if not interaction.user or not interaction.guild:
@@ -129,4 +119,9 @@ class LFGModeration(commands.Cog):
         )
 
 async def setup(bot: commands.Bot) -> None:
+    # Register a GLOBAL interaction check for all app commands.
+    @bot.tree.interaction_check
+    async def _global_interaction_check(interaction: discord.Interaction) -> bool:
+        return await slash_guard(interaction)
+
     await bot.add_cog(LFGModeration(bot))
