@@ -1,84 +1,73 @@
-export const dynamic = "force-dynamic";
-export const revalidate = 0;
+"use client";
 
-export default function Contact() {
+import { useEffect } from "react";
+import Link from "next/link";
+import { Mail, MessageCircle, Users } from "lucide-react";
+
+export default function ContactPage() {
+  // devdeej's Discord user ID — replace with your actual ID
+  const DISCORD_USER_ID = "154593850185351168";
+  const DISCORD_SERVER_URL = "https://discord.gg/7Cersw2kqv";
+
+  const handleDiscordClick = (e: React.MouseEvent<HTMLAnchorElement>) => {
+    e.preventDefault();
+
+    // Attempt to open the Discord app
+    window.location.href = `discord://discord.com/users/${DISCORD_USER_ID}`;
+
+    // Fallback to web after a short delay if the app doesn't open
+    setTimeout(() => {
+      window.location.href = `https://discord.com/users/${DISCORD_USER_ID}`;
+    }, 500);
+  };
+
   return (
-    <div className="relative">
-      {/* background accent */}
-      <div className="pointer-events-none absolute inset-x-0 -top-24 -z-10 h-64 bg-gradient-to-b from-indigo-500/25 via-indigo-500/10 to-transparent blur-3xl" />
-
-      {/* hero */}
-      <section className="mb-10 text-center">
-        <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/70">
-          Support • Get in touch
-        </span>
-        <h1 className="mt-6 text-4xl font-extrabold tracking-tight md:text-6xl">
-          Contact <span className="bg-gradient-to-r from-indigo-400 to-violet-300 bg-clip-text text-transparent">Us</span>
+    <div className="min-h-screen bg-gray-950 text-gray-100 py-16 px-6">
+      <div className="max-w-3xl mx-auto text-center">
+        <h1 className="text-4xl font-extrabold mb-6 bg-gradient-to-r from-indigo-400 to-pink-500 text-transparent bg-clip-text">
+          Contact Us
         </h1>
-        <p className="mx-auto mt-4 max-w-2xl text-white/70">
-          Whether you need help, want to report an issue, or just have feedback — we’re here for you.
+        <p className="text-lg text-gray-300 mb-12">
+          Got questions or need help with <strong>Matchmaker Bot</strong>? Reach
+          out to us below.
         </p>
-      </section>
 
-      {/* cards */}
-      <section className="grid gap-6 md:grid-cols-2">
-        <Card
-          title="Discord DM"
-          description="Reach out directly on Discord."
-          actionLabel="Message devdeej"
-          href="https://discord.com/users/devdeej"
-        />
-        <Card
-          title="Support Server"
-          description="Join our official Discord server to get help, report bugs, or share suggestions."
-          actionLabel="Join server"
-          href="https://discord.gg/7Cersw2kqv"
-        />
-      </section>
+        <div className="grid gap-6 md:grid-cols-3">
+          {/* Message devdeej */}
+          <a
+            href={`discord://discord.com/users/${DISCORD_USER_ID}`}
+            onClick={handleDiscordClick}
+            className="flex flex-col items-center justify-center rounded-2xl bg-indigo-600 hover:bg-indigo-700 p-6 transition"
+          >
+            <MessageCircle className="w-10 h-10 mb-3" />
+            <h3 className="font-semibold text-lg">Message devdeej</h3>
+            <p className="text-sm text-gray-200 mt-2">DM the developer</p>
+          </a>
 
-      {/* faq style section */}
-      <section className="mt-12 rounded-2xl border border-white/10 bg-zinc-900/60 p-6">
-        <h2 className="mb-3 text-2xl font-semibold">Common reasons to contact us</h2>
-        <ul className="space-y-3 text-white/80">
-          <li className="flex gap-3"><Dot /> Reporting a bug with the bot or site</li>
-          <li className="flex gap-3"><Dot /> Asking about premium features or staging bot access</li>
-          <li className="flex gap-3"><Dot /> Requesting removal of data (ads, server configs)</li>
-          <li className="flex gap-3"><Dot /> General feedback or feature suggestions</li>
-        </ul>
-      </section>
-    </div>
-  );
-}
+          {/* Discord Server */}
+          <Link
+            href={DISCORD_SERVER_URL}
+            target="_blank"
+            className="flex flex-col items-center justify-center rounded-2xl bg-pink-600 hover:bg-pink-700 p-6 transition"
+          >
+            <Users className="w-10 h-10 mb-3" />
+            <h3 className="font-semibold text-lg">Join the Server</h3>
+            <p className="text-sm text-gray-200 mt-2">
+              Get support & connect with others
+            </p>
+          </Link>
 
-function Card({
-  title,
-  description,
-  actionLabel,
-  href,
-}: {
-  title: string;
-  description: string;
-  actionLabel: string;
-  href: string;
-}) {
-  return (
-    <div className="flex flex-col justify-between rounded-2xl border border-white/10 bg-zinc-900/60 p-6 shadow-sm shadow-black/20">
-      <div>
-        <h3 className="text-lg font-semibold">{title}</h3>
-        <p className="mt-2 text-white/75">{description}</p>
+          {/* Email (optional backup) */}
+          <a
+            href="mailto:support@matchmakerbot.dev"
+            className="flex flex-col items-center justify-center rounded-2xl bg-gray-800 hover:bg-gray-700 p-6 transition"
+          >
+            <Mail className="w-10 h-10 mb-3" />
+            <h3 className="font-semibold text-lg">Email Support</h3>
+            <p className="text-sm text-gray-200 mt-2">support@matchmakerbot.dev</p>
+          </a>
+        </div>
       </div>
-      <a
-        href={href}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="mt-6 inline-flex items-center justify-center rounded-xl bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500"
-      >
-        {actionLabel}
-      </a>
     </div>
   );
-}
-
-function Dot() {
-  return <span className="mt-2 inline-block h-2 w-2 flex-none rounded-full bg-indigo-400" />;
 }
