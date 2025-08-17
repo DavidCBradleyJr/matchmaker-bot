@@ -1,103 +1,109 @@
+# bot/main.py
+import os
 import asyncio
 import logging
+
 import discord
+from discord import app_commands
 from discord.ext import commands
-from . import config
-from .db import init_pool, get_allowed_guilds
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("bot")
+# ---------- Logging ----------
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+log = logging.getLogger("matchmaker-bot")
 
-INTENTS = discord.Intents.default()
-INTENTS.guilds = True
-INTENTS.members = False
+# ---------- Global Slash Guard ----------
+# This function runs before every app command (via GuardedTree below).
+async def slash_guard(interaction: discord.Interaction) -> bool:
+    """
+    Return False to block; True to allow.
 
-class Bot(commands.Bot):
-    def __init__(self):
-        super().__init__(command_prefix="!", intents=INTENTS, application_id=None)
-
-    async def setup_hook(self):
-        # Connect DB (if configured) and create tables
-        if config.DATABASE_URL:
-            await init_pool(config.DATABASE_URL)
-
-        # Load cogs
-        #await self.load_extension("bot.cogs.lfg")
-        await self.load_extension("bot.cogs.allowlist")
-        await self.load_extension("bot.cogs.status")
-        await self.load_extension("bot.cogs.guild_settings")
-        await self.load_extension("bot.cogs.lfg_ads")
-        await self.load_extension("bot.cogs.lfg_moderation")
-        await self.load_extension("bot.cogs.ad_interactions")
-
-        # Register slash commands globally
-        await self.tree.sync()
-
-bot = Bot()
-
-async def allowed_guilds() -> set[int]:
-    """Return the set of guild IDs allowed for STAGING. Empty set = allow no one."""
-    if config.ENVIRONMENT != "staging":
-        return set()
-    if config.DATABASE_URL:
-        return await get_allowed_guilds("staging")
-    return set(config.STAGING_ALLOWED_GUILDS or [])
-
-@bot.event
-async def on_ready():
-    user = f"{bot.user} ({getattr(bot.user, 'id', '?')})" if bot.user else "unknown"
-    logger.info("Logged in as %s", user)
-
-    # Presence
-    status_text = config.STAGING_STATUS if config.ENVIRONMENT == "staging" else config.PROD_STATUS
+    Here we gate usage on a 'bot timeout' check. If blocked, we send an
+    ephemeral message so the user isn't left hanging.
+    """
     try:
-        await bot.change_presence(activity=discord.Game(name=status_text))
-    except Exception:
-        logger.exception("Failed to set presence")
+        from bot.utils.timeouts import is_user_timed_out  # local utility below
+    except Exception as e:
+        log.exception("Failed to import timeout utility: %s", e)
+        # If the guard itself fails, allow rather than bricking all commands.
+        return True
 
-    # STAGING: deny-by-default — leave any non-allowed guilds
-    if config.ENVIRONMENT == "staging":
-        allowed = await allowed_guilds()
-        logger.info("Staging allowlist (count=%d): %s", len(allowed), sorted(list(allowed)))
-        for g in list(bot.guilds):
-            if g.id not in allowed:
-                logger.warning("Leaving unauthorized guild: %s (%s)", g.name, g.id)
-                try:
-                    await g.leave()
-                except Exception:
-                    logger.exception("Failed to leave %s (%s)", g.name, g.id)
+    user_id = interaction.user.id if interaction.user else None
+    guild_id = interaction.guild_id
+    if not user_id or not guild_id:
+        # In DMs or missing context—decide your policy. Here we allow.
+        return True
 
-@bot.event
-async def on_guild_join(guild: discord.Guild):
-    # STAGING: deny-by-default on any new join
-    if config.ENVIRONMENT == "staging":
-        allowed = await allowed_guilds()
-        if guild.id not in allowed:
-            logger.warning("Invited to unauthorized guild: %s (%s). Leaving.", guild.name, guild.id)
-            try:
-                await guild.leave()
-            except Exception:
-                logger.exception("Failed to leave %s (%s)", guild.name, guild.id)
+    try:
+        if await is_user_timed_out(user_id, guild_id):
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "You’re currently timed out from using the bot. Try again later.",
+                    ephemeral=True,
+                )
+            return False
+    except Exception as e:
+        log.exception("Timeout check failed: %s", e)
+        # Fail-open so commands still work if your DB hiccups
+        return True
 
-async def run_health_server():
-    from aiohttp import web
+    return True
 
-    async def health(_req):
-        return web.Response(text="ok", status=200)
 
-    app = web.Application()
-    app.add_routes([web.get("/health", health)])
+class GuardedTree(app_commands.CommandTree):
+    """CommandTree that runs `slash_guard` for every incoming slash command."""
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await slash_guard(interaction)
 
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, host="0.0.0.0", port=8080)
-    await site.start()
 
-async def main():
-    await asyncio.gather(
-        run_health_server(),                # <— added
-        bot.start(config.DISCORD_TOKEN),
-    )
+# ---------- Bot ----------
+class MatchmakerBot(commands.Bot):
+    def __init__(self) -> None:
+        intents = discord.Intents.default()
+        # enable what you need; message_content is privileged
+        intents.guilds = True
+        intents.members = True
+        intents.message_content = False  # keep off unless you need it
+
+        super().__init__(
+            command_prefix=os.getenv("BOT_PREFIX", "!"),
+            intents=intents,
+            tree_cls=GuardedTree,  # <— global guard lives here
+        )
+
+    async def setup_hook(self) -> None:
+        """
+        Called inside Client.login() before ready. Load cogs/extensions here.
+        """
+        # Load your cogs. Add others as you build them.
+        # e.g., await self.load_extension("bot.cogs.lfg_ads")
+        await self.load_extension("bot.cogs.lfg_moderation")
+
+        # If you want to restrict syncing to specific guilds during dev:
+        test_guild_id = os.getenv("TEST_GUILD_ID")
+        if test_guild_id:
+            guild = discord.Object(id=int(test_guild_id))
+            await self.tree.sync(guild=guild)
+            log.info("Synced app commands to test guild %s", test_guild_id)
+        else:
+            await self.tree.sync()
+            log.info("Globally synced app commands")
+
+
+async def run_bot() -> None:
+    token = os.getenv("DISCORD_TOKEN")
+    if not token:
+        raise RuntimeError("DISCORD_TOKEN not set")
+
+    bot = MatchmakerBot()
+    await bot.start(token)
+
+
+def main() -> None:
+    asyncio.run(run_bot())
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
