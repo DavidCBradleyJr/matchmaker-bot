@@ -45,12 +45,6 @@ export default function About() {
         <h2 className="mb-3 text-2xl font-semibold">Under the hood</h2>
         <ul className="space-y-4 text-white/80">
           <li className="flex gap-3">
-            <Dot /> Discord interactions are acknowledged immediately to prevent “Unknown interaction (10062)”.
-          </li>
-          <li className="flex gap-3">
-            <Dot /> Connect uses an atomic status flip so only the first click claims an ad.
-          </li>
-          <li className="flex gap-3">
             <Dot /> Minimal data footprint: ad records, message IDs, and per-guild LFG channel settings.
           </li>
         </ul>
