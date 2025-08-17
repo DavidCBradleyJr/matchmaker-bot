@@ -11,7 +11,6 @@ import discord
 from discord.ext import commands
 
 from ..db import get_pool
-from .lfg_moderation import get_report_category, put_enforcement  # reuse helpers
 
 log = logging.getLogger("ad_interactions")
 

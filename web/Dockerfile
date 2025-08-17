@@ -1,31 +1,19 @@
-# ---- deps ----
-FROM node:20-alpine AS deps
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
 WORKDIR /app
 
-# Install prod+dev deps (for build) using npm lockfile if present
-COPY package.json package-lock.json* ./
-RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+# Add CA certs for TLS to Discord
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 
-# ---- build ----
-FROM node:20-alpine AS build
-WORKDIR /app
-COPY --from=deps /app/node_modules ./node_modules
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
 COPY . .
-# Build Next (app router)
-RUN npm run build
 
-# ---- run ----
-FROM node:20-alpine AS run
-WORKDIR /app
-ENV NODE_ENV=production
-
-# Copy only what the runtime needs
-COPY --from=build /app/.next ./.next
-COPY --from=build /app/public ./public
-COPY package.json package-lock.json* ./
-
-# Install only production deps
-RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi
-
-EXPOSE 3000
-CMD ["npm", "start", "--", "-p", "3000"]
+ENV PORT=8080
+CMD ["python","-m","bot.main"]
