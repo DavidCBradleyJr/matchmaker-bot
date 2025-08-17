@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import discord
 from discord import app_commands, ui
 from discord.ext import commands
 
 from ..db import get_pool
+
+
+# ---------------------
+# Config
+# ---------------------
+
+# How long we're willing to wait for posting the ad and broadcasting to channels
+POST_TIMEOUT_SECONDS = 15
 
 
 # ---------------------
@@ -21,12 +30,11 @@ async def safe_ack(
     """
     Safely acknowledge an interaction exactly once.
     Returns:
-      True  -> we successfully acknowledged (you may use followups)
-      False -> token invalidated or already acked elsewhere (avoid followups)
+      True  -> we successfully acknowledged (you may use followups / edits)
+      False -> token invalidated or already acked elsewhere (avoid followups/edits)
     """
     try:
         if interaction.response.is_done():
-            # Already acked (somewhere else). If we were asked to say something now, try a followup.
             if message:
                 try:
                     await interaction.followup.send(message, ephemeral=ephemeral)
@@ -35,19 +43,17 @@ async def safe_ack(
             return True
         else:
             if message:
+                # Visible immediate message (better UX during deploys than a spinner)
                 await interaction.response.send_message(message, ephemeral=ephemeral)
             else:
-                # "thinking" shows the visible spinner; set to False to ack silently.
+                # "thinking" shows the visible spinner; keep False when you don't want a bubble
                 await interaction.response.defer(ephemeral=ephemeral, thinking=use_thinking)
             return True
     except discord.InteractionResponded:
-        # Someone else won the race
         return True
     except discord.NotFound:
-        # Token invalid/expired/unknown
         return False
     except discord.HTTPException:
-        # Something else went wrong — treat as no-ack so we don't chain more errors
         return False
 
 
@@ -117,7 +123,6 @@ class ConnectButton(ui.View):
             # Include a jump link back to the exact message the user clicked
             jump = None
             try:
-                # interaction.message is the message that contains the clicked button
                 if interaction.message:
                     jump = interaction.message.jump_url
             except Exception:
@@ -138,7 +143,6 @@ class ConnectButton(ui.View):
                 sent_followup = True
 
         except Exception:
-            # Optional: import logging and log here
             if acked and not sent_followup:
                 try:
                     await interaction.followup.send(
@@ -147,7 +151,6 @@ class ConnectButton(ui.View):
                     )
                     sent_followup = True
                 except Exception:
-                    # Give up cleanly
                     pass
 
 
@@ -177,110 +180,132 @@ class LfgAds(commands.Cog):
         notes: str | None = None,
     ):
         """
-        Pattern:
-        - Ack immediately (safe_ack) to avoid 10062
-        - Insert ad
-        - Broadcast embed + Connect button to all configured guild channels
-        - Follow up to the author (only if ack succeeded)
+        Flow:
+        - Send an immediate ephemeral "Posting your ad…" (visible, not a spinner)
+        - Within a timeout, insert ad + broadcast to configured guild channels
+        - Edit the original message to the final result (success or guidance)
         """
-        # IMPORTANT: don't show the "thinking..." bubble; we only want one final response
-        acked = await safe_ack(interaction, message=None, ephemeral=True, use_thinking=False)
+        # Send the initial message (so deploy interrupts don't leave a spinner)
+        acked = await safe_ack(interaction, message="Posting your ad…", ephemeral=True, use_thinking=False)
 
-        pool = get_pool()
+        if not acked:
+            # If we couldn't ack, there's nothing safe to edit later
+            return
 
-        # Create the ad and build the embed
-        async with pool.acquire() as conn:
-            ad_id = await conn.fetchval(
-                """
-                INSERT INTO lfg_ads (author_id, author_name, game, platform, region, notes, status)
-                VALUES ($1, $2, $3, $4, $5, $6, 'open')
-                RETURNING id
-                """,
-                int(interaction.user.id),
-                str(interaction.user),
-                game,
-                platform,
-                region,
-                notes,
+        async def do_post_work() -> tuple[int, list[tuple[str, str]]]:
+            """Insert the ad, broadcast it, and return (posted_count, [(server_name, jump_url), ...])."""
+            pool = get_pool()
+
+            async with pool.acquire() as conn:
+                ad_id = await conn.fetchval(
+                    """
+                    INSERT INTO lfg_ads (author_id, author_name, game, platform, region, notes, status)
+                    VALUES ($1, $2, $3, $4, $5, $6, 'open')
+                    RETURNING id
+                    """,
+                    int(interaction.user.id),
+                    str(interaction.user),
+                    game,
+                    platform,
+                    region,
+                    notes,
+                )
+
+                title_bits: list[str] = [game]
+                if platform:
+                    title_bits.append(f"• {platform}")
+                if region:
+                    title_bits.append(f"• {region}")
+
+                embed = discord.Embed(
+                    title=" ".join(title_bits),
+                    description=notes or "Looking for teammates!",
+                    color=discord.Color.blurple(),
+                )
+                embed.set_author(
+                    name=str(interaction.user),
+                    icon_url=interaction.user.display_avatar.url,
+                )
+                embed.set_footer(text=f"Posted by {interaction.user} • Ad #{ad_id}")
+
+                rows = await conn.fetch(
+                    "SELECT guild_id, lfg_channel_id FROM guild_settings WHERE lfg_channel_id IS NOT NULL"
+                )
+
+            view = ConnectButton(ad_id=ad_id)
+
+            posted = 0
+            jump_links: list[tuple[str, str]] = []  # (server_name, jump_url)
+
+            for row in rows:
+                guild = self.bot.get_guild(int(row["guild_id"]))
+                if not guild:
+                    continue
+
+                channel = guild.get_channel(int(row["lfg_channel_id"]))
+                if not isinstance(channel, discord.TextChannel):
+                    continue
+
+                try:
+                    msg = await channel.send(embed=embed, view=view)
+                    posted += 1
+                    if len(jump_links) < 3:
+                        jump_links.append((guild.name, msg.jump_url))
+                except discord.Forbidden:
+                    continue
+                except discord.HTTPException:
+                    continue
+
+            return posted, jump_links
+
+        try:
+            posted, jump_links = await asyncio.wait_for(
+                do_post_work(),
+                timeout=POST_TIMEOUT_SECONDS,
             )
-
-            title_bits: list[str] = [game]
-            if platform:
-                title_bits.append(f"• {platform}")
-            if region:
-                title_bits.append(f"• {region}")
-
-            embed = discord.Embed(
-                title=" ".join(title_bits),
-                description=notes or "Looking for teammates!",
-                color=discord.Color.blurple(),
-            )
-            embed.set_author(
-                name=str(interaction.user),
-                icon_url=interaction.user.display_avatar.url,
-            )
-            embed.set_footer(text=f"Posted by {interaction.user} • Ad #{ad_id}")
-
-            # Fetch all configured LFG channels
-            rows = await conn.fetch(
-                "SELECT guild_id, lfg_channel_id FROM guild_settings WHERE lfg_channel_id IS NOT NULL"
-            )
-
-        view = ConnectButton(ad_id=ad_id)
-
-        posted = 0
-        jump_links: list[str] = []
-
-        for row in rows:
-            guild = self.bot.get_guild(int(row["guild_id"]))
-            if not guild:
-                continue
-
-            channel = guild.get_channel(int(row["lfg_channel_id"]))
-            if not isinstance(channel, discord.TextChannel):
-                continue
-
+        except asyncio.TimeoutError:
             try:
-                msg = await channel.send(embed=embed, view=view)
-                posted += 1
-                # Collect jump links (limit to a few for the author follow-up)
-                if len(jump_links) < 3:
-                    jump_links.append(msg.jump_url)
-            except discord.Forbidden:
-                # Missing perms in that channel — skip
-                continue
-            except discord.HTTPException:
-                # Some other send failure — skip
-                continue
-
-        # Tell the author what happened (only if we acked)
-        if acked:
-            try:
-                if posted == 0:
-                    await interaction.followup.send(
-                        "Your ad was saved, but no servers have an LFG channel configured yet.\n"
-                        "Ask server owners to run `/lfg_channel set #channel`.",
-                        ephemeral=True,
+                await interaction.edit_original_response(
+                    content=(
+                        "⏳ Timed out while posting your ad. Please try again."
                     )
-                else:
-                    # Build a compact list of jump links (up to 3 shown)
-                    link_lines = []
-                    for i, url in enumerate(jump_links, start=1):
-                        link_lines.append(f"{i}. {url}")
-                    more = ""
-                    if posted > len(jump_links):
-                        more = f"\n…and **{posted - len(jump_links)}** more."
+                )
+            except Exception:
+                pass
+            return
+        except Exception:
+            # Generic fallback
+            try:
+                await interaction.edit_original_response(
+                    content="Something went wrong while posting your ad. Please try again."
+                )
+            except Exception:
+                pass
+            return
 
-                    await interaction.followup.send(
+        # Build and send the final result (edit the original message)
+        try:
+            if posted == 0:
+                await interaction.edit_original_response(
+                    content=(
+                        "Your ad was saved, but no servers have an LFG channel configured yet.\n"
+                        "Ask server owners to run `/lfg_channel set #channel`."
+                    )
+                )
+            else:
+                link_lines = [f"{i}. **{server}** — {url}" for i, (server, url) in enumerate(jump_links, start=1)]
+                more = f"\n…and **{posted - len(jump_links)}** more." if posted > len(jump_links) else ""
+
+                await interaction.edit_original_response(
+                    content=(
                         "✅ Your ad was posted!"
                         f"\n• **Servers posted to:** {posted}"
                         + (f"\n• **Links:**\n" + "\n".join(link_lines) if link_lines else "")
-                        + more,
-                        ephemeral=True,
+                        + more
                     )
-            except (discord.NotFound, discord.HTTPException):
-                # Ack might have been invalidated; nothing else to do
-                pass
+                )
+        except (discord.NotFound, discord.HTTPException):
+            pass
 
 
 async def setup(bot: commands.Bot):
