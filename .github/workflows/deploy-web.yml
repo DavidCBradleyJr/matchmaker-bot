@@ -6,6 +6,9 @@ on:
     paths:
       - "web/**"
       - ".github/workflows/deploy-web.yml"
+      - "web/fly.*.toml"
+      - "fly.*.toml"
+  workflow_dispatch: {}
 
 jobs:
   deploy:
@@ -37,6 +40,7 @@ jobs:
             --config fly.staging.toml
           # deploy
           flyctl deploy --config fly.staging.toml --remote-only
+          flyctl apps restart matchmaker-site-staging
 
       # --- PROD on main ---
       - name: Deploy PROD (main)
@@ -56,3 +60,4 @@ jobs:
             NEXT_PUBLIC_DISCORD_PERMISSIONS="$NEXT_PUBLIC_DISCORD_PERMISSIONS" \
             --config fly.prod.toml
           flyctl deploy --config fly.prod.toml --remote-only
+          flyctl apps restart matchmaker-site
