@@ -12,8 +12,6 @@ INTENTS = discord.Intents.default()
 INTENTS.guilds = True
 INTENTS.members = False
 
-# NOTE: your code already uses config.DISCORD_TOKEN, so we don't import it separately.
-
 class Bot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=INTENTS, application_id=None)
@@ -99,21 +97,6 @@ def _mask(tok: str) -> str:
         return "<EMPTY>"
     return f"{tok[:4]}...{tok[-4:]} (len={len(tok)})"
 
-async def precheck_token(tok: str):
-    """Call /users/@me with the provided token to detect bad/empty tokens early."""
-    import aiohttp
-    headers = {"Authorization": f"Bot {tok}"}
-    try:
-        async with aiohttp.ClientSession() as sess:
-            async with sess.get("https://discord.com/api/v10/users/@me", headers=headers) as r:
-                logging.info("[PRECHECK] /users/@me status=%s", r.status)
-                if r.status != 200:
-                    body = await r.text()
-                    logging.error("[PRECHECK] Unexpected response body: %s", body)
-    except Exception:
-        logging.exception("[PRECHECK] Failed to perform token precheck")
-# ----------------------------------------------------
-
 async def main():
     # Log what we actually see at runtime (masked)
     tok = (config.DISCORD_TOKEN or "")
@@ -126,12 +109,9 @@ async def main():
         logging.error("[BOOT] No DISCORD_TOKEN in environment; aborting startup.")
         return
 
-    # Preflight check: verify the token talks to Discord before starting the bot.
-    await precheck_token(tok.strip())
-
     await asyncio.gather(
         run_health_server(),
-        bot.start(tok.strip()),
+        bot.start(config.DISCORD_TOKEN)
     )
 
 if __name__ == "__main__":
