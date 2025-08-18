@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from bot.utils.antispam import GuildWindowLimiter
 import logging
 import os
 import traceback
@@ -29,6 +30,10 @@ LOGGER.setLevel(logging.INFO)
 
 # Overall time we allow for inserting + broadcasting the ad before showing a timeout to the user.
 POST_TIMEOUT_SECONDS = int(os.getenv("LFG_POST_TIMEOUT_SECONDS", "60"))
+
+USER_COOLDOWN_SEC = 5 * 60          # 1 post per user per 5 minutes
+GUILD_WINDOW_SEC = 2 * 60           # per-channel sliding window
+GUILD_MAX_POSTS_IN_WINDOW = 3       # posts allowed per channel within window
 
 # Max concurrent channel sends to avoid rate-limit spikes
 MAX_SEND_CONCURRENCY = int(os.getenv("LFG_POST_MAX_CONCURRENCY", "5"))
@@ -196,6 +201,7 @@ class ConnectButton(ui.View):
 class LfgAds(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self._guild_limiter = GuildWindowLimiter(window_sec=GUILD_WINDOW_SEC, max_events=GUILD_MAX_POSTS_IN_WINDOW)
 
     lfg = app_commands.Group(name="lfg_ad", description="Create and manage LFG ads")
 
@@ -349,6 +355,32 @@ class LfgAds(commands.Cog):
         except (discord.NotFound, discord.HTTPException):
             pass
 
+
+
+@post.error
+async def _post_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.CommandOnCooldown):
+        retry = int(error.retry_after)
+        msg = f"Slow down! You can post again in **{retry}s**."
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+        return
+    try:
+        LOGGER.exception("Unhandled error in /post", exc_info=error)
+    except Exception:
+        pass
+    if interaction.response.is_done():
+        await interaction.followup.send(
+            "Something went wrong while posting your ad. Please try again.",
+            ephemeral=True,
+        )
+    else:
+        await interaction.response.send_message(
+            "Something went wrong while posting your ad. Please try again.",
+            ephemeral=True,
+        )
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(LfgAds(bot), override=True)
