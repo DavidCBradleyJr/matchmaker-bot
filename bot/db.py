@@ -1,8 +1,6 @@
-# bot/db.py
 from typing import Iterable
 import asyncpg
 
-# Single, unified pool
 _pool: asyncpg.Pool | None = None
 
 CREATE_SQL = """

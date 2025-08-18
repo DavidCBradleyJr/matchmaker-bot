@@ -1,9 +1,11 @@
 import asyncio
 import logging
+
 import discord
 from discord.ext import commands
-from . import config
-from .db import init_pool, get_allowed_guilds
+
+from bot import config
+from bot.db import init_pool, get_allowed_guilds
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("bot")
@@ -22,7 +24,7 @@ class Bot(commands.Bot):
             await init_pool(config.DATABASE_URL)
 
         # Load cogs
-        #await self.load_extension("bot.cogs.lfg")
+        # await self.load_extension("bot.cogs.lfg")
         await self.load_extension("bot.cogs.allowlist")
         await self.load_extension("bot.cogs.status")
         await self.load_extension("bot.cogs.guild_settings")
@@ -91,9 +93,10 @@ async def run_health_server():
     site = web.TCPSite(runner, host="0.0.0.0", port=8080)
     await site.start()
 
+
 async def main():
     await asyncio.gather(
-        run_health_server(),                # <— added
+        run_health_server(),
         bot.start(config.DISCORD_TOKEN),
     )
 
