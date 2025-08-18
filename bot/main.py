@@ -6,7 +6,7 @@ from discord.ext import commands
 
 from bot import config
 from bot.db import init_pool, get_allowed_guilds
-from bot import db
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("bot")
 
