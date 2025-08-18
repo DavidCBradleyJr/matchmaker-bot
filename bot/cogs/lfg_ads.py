@@ -39,6 +39,7 @@ PER_SEND_TIMEOUT = int(os.getenv("LFG_POST_PER_SEND_TIMEOUT", "8"))
 # If set (e.g. "1"), include a short exception typename in the ephemeral error to help debugging
 SURFACE_ERROR_CODE = os.getenv("LFG_SURFACE_ERROR_CODE", "1") == "1"
 
+
 # ---------------------
 # Utilities
 # ---------------------
