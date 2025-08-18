@@ -91,27 +91,11 @@ async def run_health_server():
     site = web.TCPSite(runner, host="0.0.0.0", port=8080)
     await site.start()
 
-# ---------- NEW: token masking + preflight ----------
-def _mask(tok: str) -> str:
-    if not tok:
-        return "<EMPTY>"
-    return f"{tok[:4]}...{tok[-4:]} (len={len(tok)})"
 
 async def main():
-    # Log what we actually see at runtime (masked)
-    tok = (config.DISCORD_TOKEN or "")
-    logging.info("[BOOT] ENVIRONMENT=%s", getattr(config, "ENVIRONMENT", "<unset>"))
-    logging.info("[BOOT] DISCORD_TOKEN present=%s value=%s", bool(tok), _mask(tok))
-    if tok.endswith("\n"):
-        logging.warning("[BOOT] DISCORD_TOKEN appears to end with a newline — this can break auth")
-
-    if not tok:
-        logging.error("[BOOT] No DISCORD_TOKEN in environment; aborting startup.")
-        return
-
     await asyncio.gather(
         run_health_server(),
-        bot.start(config.DISCORD_TOKEN)
+        bot.start(config.DISCORD_TOKEN),
     )
 
 if __name__ == "__main__":
