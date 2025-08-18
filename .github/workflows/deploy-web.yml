@@ -1,63 +1,89 @@
 name: Deploy Web (staging & prod)
-
-on:
+true:
   push:
-    branches: [ staging, main ]
+    branches:
+    - staging
+    - main
     paths:
-      - "web/**"
-      - ".github/workflows/deploy-web.yml"
-      - "web/fly.*.toml"
-      - "fly.*.toml"
+    - web/**
+    - .github/workflows/deploy-web.yml
+    - web/fly.*.toml
+    - fly.*.toml
   workflow_dispatch: {}
-
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Flyctl
-        uses: superfly/flyctl-actions/setup-flyctl@master
-
-      # --- STAGING on develop ---
-      - name: Deploy STAGING (develop)
-        if: github.ref_name == 'staging'
-        working-directory: web
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-          NEXT_PUBLIC_ENV: ${{ secrets.STAGING_NEXT_PUBLIC_ENV }}
-          NEXT_PUBLIC_DISCORD_CLIENT_ID: ${{ secrets.STAGING_NEXT_PUBLIC_DISCORD_CLIENT_ID }}
-          NEXT_PUBLIC_DISCORD_SCOPES: ${{ secrets.STAGING_NEXT_PUBLIC_DISCORD_SCOPES }}
-          NEXT_PUBLIC_DISCORD_PERMISSIONS: ${{ secrets.STAGING_NEXT_PUBLIC_DISCORD_PERMISSIONS }}
-        run: |
-          # seed/update app secrets on Fly from GH Secrets
-          flyctl secrets set \
-            NEXT_PUBLIC_ENV="$NEXT_PUBLIC_ENV" \
-            NEXT_PUBLIC_DISCORD_CLIENT_ID="$NEXT_PUBLIC_DISCORD_CLIENT_ID" \
-            NEXT_PUBLIC_DISCORD_SCOPES="$NEXT_PUBLIC_DISCORD_SCOPES" \
-            NEXT_PUBLIC_DISCORD_PERMISSIONS="$NEXT_PUBLIC_DISCORD_PERMISSIONS" \
-            --config fly.staging.toml
-          # deploy
-          flyctl deploy --config fly.staging.toml --remote-only
-          flyctl apps restart matchmaker-site-staging
-
-      # --- PROD on main ---
-      - name: Deploy PROD (main)
-        if: github.ref_name == 'main'
-        working-directory: web
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-          NEXT_PUBLIC_ENV: ${{ secrets.PROD_NEXT_PUBLIC_ENV }}
-          NEXT_PUBLIC_DISCORD_CLIENT_ID: ${{ secrets.PROD_NEXT_PUBLIC_DISCORD_CLIENT_ID }}
-          NEXT_PUBLIC_DISCORD_SCOPES: ${{ secrets.PROD_NEXT_PUBLIC_DISCORD_SCOPES }}
-          NEXT_PUBLIC_DISCORD_PERMISSIONS: ${{ secrets.PROD_NEXT_PUBLIC_DISCORD_PERMISSIONS }}
-        run: |
-          flyctl secrets set \
-            NEXT_PUBLIC_ENV="$NEXT_PUBLIC_ENV" \
-            NEXT_PUBLIC_DISCORD_CLIENT_ID="$NEXT_PUBLIC_DISCORD_CLIENT_ID" \
-            NEXT_PUBLIC_DISCORD_SCOPES="$NEXT_PUBLIC_DISCORD_SCOPES" \
-            NEXT_PUBLIC_DISCORD_PERMISSIONS="$NEXT_PUBLIC_DISCORD_PERMISSIONS" \
-            --config fly.prod.toml
-          flyctl deploy --config fly.prod.toml --remote-only
-          flyctl apps restart matchmaker-site
+    - uses: actions/checkout@v4
+    - name: Install Flyctl
+      uses: superfly/flyctl-actions/setup-flyctl@master
+    - name: Start stopped machines (matchmaker-site-staging)
+      shell: bash
+      run: "set -euo pipefail\nAPP=\"matchmaker-site-staging\"\nSTOPPED=$(flyctl machines\
+        \ list -a \"$APP\" --json | python - <<'PY'\nimport json,sys\nm=json.load(sys.stdin)\n\
+        ids=[x.get(\"id\") for x in m if x.get(\"state\")==\"stopped\"]\nprint(\"\\\
+        n\".join([i for i in ids if i]))\nPY\n)\nif [ -n \"$STOPPED\" ]; then\n  for\
+        \ id in $STOPPED; do\n    echo \"Starting $id...\"\n    flyctl machine start\
+        \ -a \"$APP\" \"$id\" --yes\n  done\n  sleep 5\nelse\n  echo \"No stopped\
+        \ machines for $APP.\"\nfi"
+    - name: Start stopped machines (matchmaker-site)
+      shell: bash
+      run: "set -euo pipefail\nAPP=\"matchmaker-site\"\nSTOPPED=$(flyctl machines\
+        \ list -a \"$APP\" --json | python - <<'PY'\nimport json,sys\nm=json.load(sys.stdin)\n\
+        ids=[x.get(\"id\") for x in m if x.get(\"state\")==\"stopped\"]\nprint(\"\\\
+        n\".join([i for i in ids if i]))\nPY\n)\nif [ -n \"$STOPPED\" ]; then\n  for\
+        \ id in $STOPPED; do\n    echo \"Starting $id...\"\n    flyctl machine start\
+        \ -a \"$APP\" \"$id\" --yes\n  done\n  sleep 5\nelse\n  echo \"No stopped\
+        \ machines for $APP.\"\nfi"
+    - name: Deploy STAGING (develop)
+      if: github.ref_name == 'staging'
+      working-directory: web
+      env:
+        FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        NEXT_PUBLIC_ENV: ${{ secrets.STAGING_NEXT_PUBLIC_ENV }}
+        NEXT_PUBLIC_DISCORD_CLIENT_ID: ${{ secrets.STAGING_NEXT_PUBLIC_DISCORD_CLIENT_ID
+          }}
+        NEXT_PUBLIC_DISCORD_SCOPES: ${{ secrets.STAGING_NEXT_PUBLIC_DISCORD_SCOPES
+          }}
+        NEXT_PUBLIC_DISCORD_PERMISSIONS: ${{ secrets.STAGING_NEXT_PUBLIC_DISCORD_PERMISSIONS
+          }}
+      run: "# seed/update app secrets on Fly from GH Secrets\nflyctl secrets set \\\
+        \n  NEXT_PUBLIC_ENV=\"$NEXT_PUBLIC_ENV\" \\\n  NEXT_PUBLIC_DISCORD_CLIENT_ID=\"\
+        $NEXT_PUBLIC_DISCORD_CLIENT_ID\" \\\n  NEXT_PUBLIC_DISCORD_SCOPES=\"$NEXT_PUBLIC_DISCORD_SCOPES\"\
+        \ \\\n  NEXT_PUBLIC_DISCORD_PERMISSIONS=\"$NEXT_PUBLIC_DISCORD_PERMISSIONS\"\
+        \ \\\n  --config fly.staging.toml\n# deploy\nflyctl deploy --config fly.staging.toml\
+        \ --remote-only\nflyctl apps restart matchmaker-site-staging\n"
+    - name: Start stopped machines (matchmaker-site-staging)
+      shell: bash
+      run: "set -euo pipefail\nAPP=\"matchmaker-site-staging\"\nSTOPPED=$(flyctl machines\
+        \ list -a \"$APP\" --json | python - <<'PY'\nimport json,sys\nm=json.load(sys.stdin)\n\
+        ids=[x.get(\"id\") for x in m if x.get(\"state\")==\"stopped\"]\nprint(\"\\\
+        n\".join([i for i in ids if i]))\nPY\n)\nif [ -n \"$STOPPED\" ]; then\n  for\
+        \ id in $STOPPED; do\n    echo \"Starting $id...\"\n    flyctl machine start\
+        \ -a \"$APP\" \"$id\" --yes\n  done\n  sleep 5\nelse\n  echo \"No stopped\
+        \ machines for $APP.\"\nfi"
+    - name: Start stopped machines (matchmaker-site)
+      shell: bash
+      run: "set -euo pipefail\nAPP=\"matchmaker-site\"\nSTOPPED=$(flyctl machines\
+        \ list -a \"$APP\" --json | python - <<'PY'\nimport json,sys\nm=json.load(sys.stdin)\n\
+        ids=[x.get(\"id\") for x in m if x.get(\"state\")==\"stopped\"]\nprint(\"\\\
+        n\".join([i for i in ids if i]))\nPY\n)\nif [ -n \"$STOPPED\" ]; then\n  for\
+        \ id in $STOPPED; do\n    echo \"Starting $id...\"\n    flyctl machine start\
+        \ -a \"$APP\" \"$id\" --yes\n  done\n  sleep 5\nelse\n  echo \"No stopped\
+        \ machines for $APP.\"\nfi"
+    - name: Deploy PROD (main)
+      if: github.ref_name == 'main'
+      working-directory: web
+      env:
+        FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        NEXT_PUBLIC_ENV: ${{ secrets.PROD_NEXT_PUBLIC_ENV }}
+        NEXT_PUBLIC_DISCORD_CLIENT_ID: ${{ secrets.PROD_NEXT_PUBLIC_DISCORD_CLIENT_ID
+          }}
+        NEXT_PUBLIC_DISCORD_SCOPES: ${{ secrets.PROD_NEXT_PUBLIC_DISCORD_SCOPES }}
+        NEXT_PUBLIC_DISCORD_PERMISSIONS: ${{ secrets.PROD_NEXT_PUBLIC_DISCORD_PERMISSIONS
+          }}
+      run: "flyctl secrets set \\\n  NEXT_PUBLIC_ENV=\"$NEXT_PUBLIC_ENV\" \\\n  NEXT_PUBLIC_DISCORD_CLIENT_ID=\"\
+        $NEXT_PUBLIC_DISCORD_CLIENT_ID\" \\\n  NEXT_PUBLIC_DISCORD_SCOPES=\"$NEXT_PUBLIC_DISCORD_SCOPES\"\
+        \ \\\n  NEXT_PUBLIC_DISCORD_PERMISSIONS=\"$NEXT_PUBLIC_DISCORD_PERMISSIONS\"\
+        \ \\\n  --config fly.prod.toml\nflyctl deploy --config fly.prod.toml --remote-only\n\
+        flyctl apps restart matchmaker-site"
