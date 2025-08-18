@@ -31,9 +31,11 @@ LOGGER.setLevel(logging.INFO)
 # Overall time we allow for inserting + broadcasting the ad before showing a timeout to the user.
 POST_TIMEOUT_SECONDS = int(os.getenv("LFG_POST_TIMEOUT_SECONDS", "60"))
 
+# --- Anti-spam tunables (added) ---
 USER_COOLDOWN_SEC = 5 * 60          # 1 post per user per 5 minutes
 GUILD_WINDOW_SEC = 2 * 60           # per-channel sliding window
 GUILD_MAX_POSTS_IN_WINDOW = 3       # posts allowed per channel within window
+
 
 # Max concurrent channel sends to avoid rate-limit spikes
 MAX_SEND_CONCURRENCY = int(os.getenv("LFG_POST_MAX_CONCURRENCY", "5"))
@@ -356,21 +358,18 @@ class LfgAds(commands.Cog):
             pass
 
 
-
-@post.error
-async def _post_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+    """Handle errors for this cog's app commands."""
     if isinstance(error, app_commands.CommandOnCooldown):
         retry = int(error.retry_after)
-        msg = f"Slow down! You can post again in **{retry}s**."
+        msg = f"⏳ Slow down! You can post again in **{retry}s**."
         if interaction.response.is_done():
             await interaction.followup.send(msg, ephemeral=True)
         else:
             await interaction.response.send_message(msg, ephemeral=True)
         return
-    try:
-        LOGGER.exception("Unhandled error in /post", exc_info=error)
-    except Exception:
-        pass
+
+    LOGGER.exception("Unhandled error in LFG ads command", exc_info=error)
     if interaction.response.is_done():
         await interaction.followup.send(
             "Something went wrong while posting your ad. Please try again.",
@@ -381,6 +380,7 @@ async def _post_error(self, interaction: discord.Interaction, error: app_command
             "Something went wrong while posting your ad. Please try again.",
             ephemeral=True,
         )
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(LfgAds(bot), override=True)
