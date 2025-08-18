@@ -1,28 +1,39 @@
 name: Deploy Staging
+<<<<<<< HEAD
+=======
+
+>>>>>>> parent of 646fdc9 (adding spam protection)
 on:
   push:
-    branches:
-    - staging
+    branches: [ staging ]
   workflow_dispatch: {}
+
 concurrency:
   group: staging-deploy
   cancel-in-progress: true
+
 jobs:
   prepare:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    - uses: superfly/flyctl-actions/setup-flyctl@master
-    - name: Set Fly secrets (staging)
-      env:
-        FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-        DISCORD_TOKEN: ${{ secrets.STAGING_DISCORD_TOKEN }}
-        DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
-        INVITE_URL: ${{ secrets.STAGING_PUBLIC_INVITE_URL }}
-      run: "# Set all secrets needed by the app; triggers a rolling restart\nflyctl\
-        \ secrets set \\\n  DISCORD_TOKEN=\"$DISCORD_TOKEN\" \\\n  DATABASE_URL=\"\
-        $DATABASE_URL\" \\\n  ENVIRONMENT=staging \\\n  PUBLIC_INVITE_URL=\"${INVITE_URL:-}\"\
-        \ \\\n  -a matchmaker-staging-bot\n"
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Set Fly secrets (staging)
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          DISCORD_TOKEN: ${{ secrets.STAGING_DISCORD_TOKEN }}
+          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          INVITE_URL: ${{ secrets.STAGING_PUBLIC_INVITE_URL }}
+        run: |
+          # Set all secrets needed by the app; triggers a rolling restart
+          flyctl secrets set \
+            DISCORD_TOKEN="$DISCORD_TOKEN" \
+            DATABASE_URL="$DATABASE_URL" \
+            ENVIRONMENT=staging \
+            PUBLIC_INVITE_URL="${INVITE_URL:-}" \
+            -a matchmaker-staging-bot
+
   deploy:
     needs: prepare
     runs-on: ubuntu-latest
@@ -30,20 +41,11 @@ jobs:
       name: staging
       url: https://matchmaker-staging-bot.fly.dev/health
     steps:
-    - uses: actions/checkout@v4
-    - uses: superfly/flyctl-actions/setup-flyctl@master
-    - name: Start stopped machines (matchmaker-staging-bot)
-      shell: bash
-      run: "set -euo pipefail\nAPP=\"matchmaker-staging-bot\"\nSTOPPED=$(flyctl machines\
-        \ list -a \"$APP\" --json | python - <<'PY'\nimport json,sys\nm=json.load(sys.stdin)\n\
-        ids=[x.get(\"id\") for x in m if x.get(\"state\")==\"stopped\"]\nprint(\"\\\
-        n\".join([i for i in ids if i]))\nPY\n)\nif [ -n \"$STOPPED\" ]; then\n  for\
-        \ id in $STOPPED; do\n    echo \"Starting $id...\"\n    flyctl machine start\
-        \ -a \"$APP\" \"$id\" --yes\n  done\n  sleep 5\nelse\n  echo \"No stopped\
-        \ machines for $APP.\"\nfi"
-    - name: Deploy to Fly (staging)
-      env:
-        FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-      run: 'flyctl deploy --local-only -c fly.staging.toml
-
-        flyctl apps restart matchmaker-staging-bot'
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Deploy to Fly (staging)
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          flyctl deploy --local-only -c fly.staging.toml
+          flyctl apps restart matchmaker-staging-bot
