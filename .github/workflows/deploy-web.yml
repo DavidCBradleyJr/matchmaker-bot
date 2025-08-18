@@ -1,8 +1,4 @@
 name: Deploy Web (staging & prod)
-<<<<<<< HEAD
-=======
-
->>>>>>> parent of 646fdc9 (adding spam protection)
 on:
   push:
     branches: [ staging, main ]
