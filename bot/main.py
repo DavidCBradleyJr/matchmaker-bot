@@ -2,8 +2,8 @@ import asyncio
 import logging
 import discord
 from discord.ext import commands
-from . import config
-from .db import init_pool, get_allowed_guilds
+import config
+from db import init_pool, get_allowed_guilds
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("bot")
