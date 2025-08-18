@@ -1,7 +1,7 @@
 from typing import Iterable
 import asyncpg
 
-]_pool: asyncpg.Pool | None = None
+_pool: asyncpg.Pool | None = None
 
 CREATE_SQL = """
 CREATE TABLE IF NOT EXISTS allowed_guilds (
