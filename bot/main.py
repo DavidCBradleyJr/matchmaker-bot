@@ -4,7 +4,7 @@ import logging
 import discord
 from discord.ext import commands
 
-import config
+from bot import config
 from db import init_pool, get_allowed_guilds
 
 logging.basicConfig(level=logging.INFO)
