@@ -17,16 +17,6 @@ async def send_pretty_interest_dm(
 ) -> None:
     """
     Compose and send a polished DM to the connector after they click "I'm interested".
-
-    Parameters
-    ----------
-    recipient : the user who clicked the button (connector)
-    poster    : the original ad owner
-    ad_id     : integer ad identifier (for context in footer)
-    game      : game title from the ad
-    notes     : optional ad notes
-    message_jump : jump URL back to the ad message (if available)
-    guild     : guild where the ad was posted (for name context)
     """
     # Nice, stable-but-varied accent color based on game name
     color_seed = (sum(ord(c) for c in (game or "")) % 255)
@@ -38,6 +28,7 @@ async def send_pretty_interest_dm(
             "You clicked **I’m interested** on an LFG post.\n\n"
             f"**Poster:** {poster.mention}\n"
             f"**Server:** {guild.name if guild else 'Unknown'}"
+            "\n\n[🔗 Powered by Matchmaker](https://matchmaker-site.fly.dev/)"
         ),
         color=color,
         timestamp=datetime.datetime.utcnow(),
@@ -55,7 +46,7 @@ async def send_pretty_interest_dm(
         trimmed = notes if len(notes) <= 256 else notes[:253] + "…"
         embed.add_field(name="Notes", value=trimmed, inline=False)
 
-    embed.set_footer(text=f"Ad #{ad_id} • Send a friendly opener!")
+    embed.set_footer(text=f"Ad #{ad_id} • Powered by Matchmaker", icon_url="https://i.imgur.com/4x9pIr0.png")
 
     # DM view with a jump back to the original ad
     view = discord.ui.View()

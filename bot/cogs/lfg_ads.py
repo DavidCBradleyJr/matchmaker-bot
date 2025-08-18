@@ -10,7 +10,7 @@ from discord import app_commands, ui
 from discord.ext import commands
 
 from ..db import get_pool
-from ..ui.dm_styles import send_pretty_interest_dm  # NEW: import the helper
+from ..ui.dm_styles import send_pretty_interest_dm  # import the helper
 
 # ---------------------
 # Logging
@@ -150,7 +150,7 @@ class ConnectButton(ui.View):
                 except Exception:
                     LOGGER.info("Owner DM failed; continuing", exc_info=True)
 
-            # --- PRETTY DM to the connector (moved to ui.dm_styles) ---
+            # --- PRETTY DM to the connector (reusable helper) ---
             try:
                 await send_pretty_interest_dm(
                     recipient=user,
@@ -272,14 +272,18 @@ class LfgAds(commands.Cog):
 
                 embed = discord.Embed(
                     title=" ".join(title_bits),
-                    description=notes or "Looking for teammates!",
+                    description=(notes or "Looking for teammates!")
+                                + "\n\n[🔗 Powered by Matchmaker](https://matchmaker.gg)",
                     color=discord.Color.blurple(),
                 )
                 embed.set_author(
                     name=str(interaction.user),
                     icon_url=interaction.user.display_avatar.url,
                 )
-                embed.set_footer(text=f"Posted by {interaction.user} • Ad #{ad_id}")
+                embed.set_footer(
+                    text=f"Posted by {interaction.user} • Ad #{ad_id} • Powered by Matchmaker",
+                    icon_url="https://matchmaker.gg/favicon.ico"
+                )
 
                 async with pool.acquire() as conn:
                     rows = await conn.fetch(
