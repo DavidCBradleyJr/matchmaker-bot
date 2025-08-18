@@ -30,6 +30,10 @@ LOGGER.setLevel(logging.INFO)
 # Overall time we allow for inserting + broadcasting the ad before showing a timeout to the user.
 POST_TIMEOUT_SECONDS = int(os.getenv("LFG_POST_TIMEOUT_SECONDS", "60"))
 
+# --- Anti-spam tunable ---
+USER_COOLDOWN_SEC = 5 * 60  # 1 post per user per 5 minutes
+
+
 # Max concurrent channel sends to avoid rate-limit spikes
 MAX_SEND_CONCURRENCY = int(os.getenv("LFG_POST_MAX_CONCURRENCY", "5"))
 
@@ -200,6 +204,8 @@ class LfgAds(commands.Cog):
     lfg = app_commands.Group(name="lfg_ad", description="Create and manage LFG ads")
 
     @lfg.command(name="post", description="Post an LFG ad")
+    @app_commands.checks.cooldown(1, USER_COOLDOWN_SEC, key=lambda i: (i.guild_id, i.user.id))
+    @app_commands.guild_only()
     @app_commands.describe(
         game="The game you want to play",
         platform="PC/PS/Xbox/Switch/Mobile (optional)",
@@ -348,6 +354,30 @@ class LfgAds(commands.Cog):
                 )
         except (discord.NotFound, discord.HTTPException):
             pass
+
+
+    async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        """Handle errors for this cog's app commands."""
+        if isinstance(error, app_commands.CommandOnCooldown):
+            retry = int(error.retry_after)
+            msg = f"⏳ Slow down! You can post again in **{retry}s**."
+            if interaction.response.is_done():
+                await interaction.followup.send(msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(msg, ephemeral=True)
+            return
+
+        LOGGER.exception("Unhandled error in LFG ads command", exc_info=error)
+        if interaction.response.is_done():
+            await interaction.followup.send(
+                "Something went wrong while posting your ad. Please try again.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                "Something went wrong while posting your ad. Please try again.",
+                ephemeral=True,
+            )
 
 
 async def setup(bot: commands.Bot):

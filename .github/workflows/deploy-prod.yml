@@ -1,5 +1,4 @@
 name: Deploy Production
-
 on:
   push:
     branches: [ main ]
@@ -8,6 +7,7 @@ on:
 concurrency:
   group: prod-deploy
   cancel-in-progress: true
+
 
 jobs:
   prepare:
