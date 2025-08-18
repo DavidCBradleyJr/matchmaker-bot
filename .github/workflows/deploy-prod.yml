@@ -1,36 +1,28 @@
 name: Deploy Production
-
 on:
   push:
-    branches: [ main ]
+    branches:
+    - main
   workflow_dispatch: {}
-
 concurrency:
   group: prod-deploy
   cancel-in-progress: true
-
 jobs:
   prepare:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: superfly/flyctl-actions/setup-flyctl@master
-
-      - name: Set Fly secrets (production)
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-          DISCORD_TOKEN: ${{ secrets.PROD_DISCORD_TOKEN }}
-          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
-          INVITE_URL: ${{ secrets.PROD_PUBLIC_INVITE_URL }}
-        run: |
-          # Set all secrets needed by the app; triggers a rolling restart
-          flyctl secrets set \
-            DISCORD_TOKEN="$DISCORD_TOKEN" \
-            DATABASE_URL="$DATABASE_URL" \
-            ENVIRONMENT=production \
-            PUBLIC_INVITE_URL="${INVITE_URL:-}" \
-            -a matchmaker-prod-bot
-
+    - uses: actions/checkout@v4
+    - uses: superfly/flyctl-actions/setup-flyctl@master
+    - name: Set Fly secrets (production)
+      env:
+        FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        DISCORD_TOKEN: ${{ secrets.PROD_DISCORD_TOKEN }}
+        DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+        INVITE_URL: ${{ secrets.PROD_PUBLIC_INVITE_URL }}
+      run: "# Set all secrets needed by the app; triggers a rolling restart\nflyctl\
+        \ secrets set \\\n  DISCORD_TOKEN=\"$DISCORD_TOKEN\" \\\n  DATABASE_URL=\"\
+        $DATABASE_URL\" \\\n  ENVIRONMENT=production \\\n  PUBLIC_INVITE_URL=\"${INVITE_URL:-}\"\
+        \ \\\n  -a matchmaker-prod-bot\n"
   deploy:
     needs: prepare
     runs-on: ubuntu-latest
@@ -38,11 +30,22 @@ jobs:
       name: production
       url: https://matchmaker-prod-bot.fly.dev/health
     steps:
-      - uses: actions/checkout@v4
-      - uses: superfly/flyctl-actions/setup-flyctl@master
-      - name: Deploy to Fly (production)
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-        run: |
-          flyctl deploy --local-only -c fly.prod.toml
-          flyctl apps restart matchmaker-prod-bot
+    - uses: actions/checkout@v4
+    - uses: superfly/flyctl-actions/setup-flyctl@master
+    - name: Start stopped machines (matchmaker-prod-bot)
+      shell: bash
+      run: "set -euo pipefail\nAPP=\"matchmaker-prod-bot\"\nSTOPPED=$(flyctl machines\
+        \ list -a \"$APP\" --json | python - <<'PY'\nimport json,sys\nm=json.load(sys.stdin)\n\
+        ids=[x.get(\"id\") for x in m if x.get(\"state\")==\"stopped\"]\nprint(\"\\\
+        n\".join([i for i in ids if i]))\nPY\n)\nif [ -n \"$STOPPED\" ]; then\n  for\
+        \ id in $STOPPED; do\n    echo \"Starting $id...\"\n    flyctl machine start\
+        \ -a \"$APP\" \"$id\" --yes\n  done\n  sleep 5\nelse\n  echo \"No stopped\
+        \ machines for $APP.\"\nfi"
+    - name: Deploy to Fly (production)
+      env:
+        FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      run: 'flyctl deploy --local-only -c fly.prod.toml
+
+        flyctl apps restart matchmaker-prod-bot
+
+        '
