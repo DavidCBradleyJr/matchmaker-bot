@@ -1,84 +1,56 @@
-// web/app/page.tsx
 "use client";
 
-import { motion } from "motion/react"; // if not installed, `npm i motion`
-import Link from "next/link";
+import { motion } from "motion/react";
+import CTAInvite from "@/components/CTAInvite";
+import FeatureCard from "@/components/FeatureCard";
 
 export default function Page() {
   return (
-    <main className="relative overflow-hidden">
-      {/* subtle background */}
+    <div className="relative overflow-hidden">
+      {/* Subtle background */}
       <div aria-hidden className="pointer-events-none absolute inset-0 -z-10">
         <div className="absolute inset-0 bg-[radial-gradient(900px_500px_at_50%_-10%,rgba(99,102,241,0.16),transparent_60%)] dark:bg-[radial-gradient(900px_500px_at_50%_-10%,rgba(99,102,241,0.12),transparent_60%)]" />
         <div className="absolute inset-0 opacity-[0.08] mix-blend-soft-light [background-image:repeating-linear-gradient(0deg,rgba(255,255,255,0.06)_0px,rgba(255,255,255,0.06)_1px,transparent_1px,transparent_2px)] dark:opacity-[0.06]" />
       </div>
 
-      <section className="mx-auto max-w-6xl px-6 py-20 md:py-28">
+      {/* Hero */}
+      <section className="px-4 py-16 md:py-24">
         <motion.div
           initial={{ opacity: 0, y: 14 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.6, ease: "easeOut" }}
-          className="mx-auto max-w-2xl text-center"
+          className="mx-auto max-w-3xl text-center"
         >
-          <span className="inline-flex items-center justify-center rounded-full border border-border/60 bg-background/60 px-3 py-1 text-xs font-medium text-muted-foreground backdrop-blur-sm">
+          <span className="inline-flex items-center justify-center rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-medium text-zinc-300/80 backdrop-blur-sm">
             Minimal. Fast. Discord‑native.
           </span>
 
           <h1 className="mt-5 text-balance text-4xl font-semibold tracking-tight md:text-5xl">
-            Find teammates <span className="text-primary">instantly</span>.
+            Find teammates <span className="text-indigo-400">instantly</span>.
           </h1>
 
-          <p className="mx-auto mt-4 max-w-xl text-pretty text-base text-muted-foreground">
+          <p className="mx-auto mt-4 max-w-xl text-pretty text-base text-zinc-300/90">
             Post once. We broadcast to your channels. Players connect via polished DMs—no clutter.
           </p>
 
-          <div className="mt-8 flex items-center justify-center gap-3">
-            <Link
-              href="/invite"
-              className="rounded-2xl bg-primary px-5 py-3 text-sm font-medium text-primary-foreground shadow-sm hover:opacity-90"
-            >
-              Add to Discord
-            </Link>
-            <a
-              href="https://github.com/DavidCBradleyJr/matchmaker-bot"
-              target="_blank"
-              rel="noreferrer"
-              className="rounded-2xl px-5 py-3 text-sm font-medium text-muted-foreground hover:text-foreground"
-            >
-              View code →
-            </a>
+          <div className="mt-8 flex items-center justify-center">
+            <CTAInvite />
           </div>
 
-          <div className="mt-6 text-xs text-muted-foreground">
+          <div className="mt-6 text-xs text-zinc-400/80">
             Trusted by servers who hate spammy LFGs.
           </div>
         </motion.div>
       </section>
 
-      <section className="mx-auto max-w-6xl px-6 pb-16">
-        <div className="grid gap-4 md:grid-cols-3">
-          {[
-            ["Post", "Create a single LFG ad from any server."],
-            ["Broadcast", "We deliver it to your chosen channels."],
-            ["Connect", "Players click once; bot opens polished DMs."],
-          ].map(([title, text]) => (
-            <div key={title} className="rounded-2xl border bg-background/60 p-6">
-              <h3 className="text-base font-semibold">{title}</h3>
-              <p className="mt-1 text-sm text-muted-foreground">{text}</p>
-            </div>
-          ))}
+      {/* How it works */}
+      <section className="px-4 pb-12">
+        <div className="mx-auto grid max-w-6xl gap-4 md:grid-cols-3">
+          <FeatureCard title="Post" desc="Create a single LFG ad from any server." />
+          <FeatureCard title="Broadcast" desc="We deliver it to your chosen channels." />
+          <FeatureCard title="Connect" desc="Players click once; bot opens polished DMs." />
         </div>
       </section>
-
-      <footer className="border-t">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-6 text-xs text-muted-foreground">
-          <span>© {new Date().getFullYear()} Matchmaker</span>
-          <span className="flex items-center gap-3">
-            <a className="hover:text-foreground" href="/privacy">Privacy</a>
-            <a className="hover:text-foreground" href="/terms">Terms</a>
-          </span>
-        </div>
-      </footer>
-    </main>
+    </div>
   );
 }
