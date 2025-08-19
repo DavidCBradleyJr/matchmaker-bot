@@ -29,6 +29,7 @@ jobs:
           NEXT_PUBLIC_DISCORD_CLIENT_ID: ${{ secrets.STAGING_NEXT_PUBLIC_DISCORD_CLIENT_ID }}
           NEXT_PUBLIC_DISCORD_SCOPES: ${{ secrets.STAGING_NEXT_PUBLIC_DISCORD_SCOPES }}
           NEXT_PUBLIC_DISCORD_PERMISSIONS: ${{ secrets.STAGING_NEXT_PUBLIC_DISCORD_PERMISSIONS }}
+
         run: |
           # seed/update app secrets on Fly from GH Secrets
           flyctl secrets set \
