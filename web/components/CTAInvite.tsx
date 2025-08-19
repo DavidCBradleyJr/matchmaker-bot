@@ -41,5 +41,4 @@ function CTAInviteImpl({
   );
 }
 
-const CTAInvite = memo(CTAInviteImpl);
-export default CTAInvite;
+export default memo(CTAInviteImpl);
