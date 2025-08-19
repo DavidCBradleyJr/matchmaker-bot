@@ -1,4 +1,5 @@
 name: Deploy Web (staging & prod)
+
 on:
   push:
     branches: [ staging, main ]
@@ -19,7 +20,7 @@ jobs:
       - name: Install Flyctl
         uses: superfly/flyctl-actions/setup-flyctl@master
 
-      # --- STAGING on develop ---
+      # --- STAGING on 'staging' ---
       - name: Deploy STAGING (develop)
         if: github.ref_name == 'staging'
         working-directory: web
@@ -29,20 +30,26 @@ jobs:
           NEXT_PUBLIC_DISCORD_CLIENT_ID: ${{ secrets.STAGING_NEXT_PUBLIC_DISCORD_CLIENT_ID }}
           NEXT_PUBLIC_DISCORD_SCOPES: ${{ secrets.STAGING_NEXT_PUBLIC_DISCORD_SCOPES }}
           NEXT_PUBLIC_DISCORD_PERMISSIONS: ${{ secrets.STAGING_NEXT_PUBLIC_DISCORD_PERMISSIONS }}
-
         run: |
-          # seed/update app secrets on Fly from GH Secrets
+          # Set runtime secrets (server-side usage)
           flyctl secrets set \
             NEXT_PUBLIC_ENV="$NEXT_PUBLIC_ENV" \
             NEXT_PUBLIC_DISCORD_CLIENT_ID="$NEXT_PUBLIC_DISCORD_CLIENT_ID" \
             NEXT_PUBLIC_DISCORD_SCOPES="$NEXT_PUBLIC_DISCORD_SCOPES" \
             NEXT_PUBLIC_DISCORD_PERMISSIONS="$NEXT_PUBLIC_DISCORD_PERMISSIONS" \
             --config fly.staging.toml
-          # deploy
-          flyctl deploy --config fly.staging.toml --remote-only
+
+          # Build with the right client-side values (Next.js needs these at build time)
+          flyctl deploy --config fly.staging.toml --remote-only \
+            --build-arg NEXT_PUBLIC_ENV="$NEXT_PUBLIC_ENV" \
+            --build-arg NEXT_PUBLIC_DISCORD_CLIENT_ID="$NEXT_PUBLIC_DISCORD_CLIENT_ID" \
+            --build-arg NEXT_PUBLIC_DISCORD_SCOPES="$NEXT_PUBLIC_DISCORD_SCOPES" \
+            --build-arg NEXT_PUBLIC_DISCORD_PERMISSIONS="$NEXT_PUBLIC_DISCORD_PERMISSIONS"
+
+          # Optional: nudge app after deploy
           flyctl apps restart matchmaker-site-staging
 
-      # --- PROD on main ---
+      # --- PROD on 'main' ---
       - name: Deploy PROD (main)
         if: github.ref_name == 'main'
         working-directory: web
@@ -59,5 +66,11 @@ jobs:
             NEXT_PUBLIC_DISCORD_SCOPES="$NEXT_PUBLIC_DISCORD_SCOPES" \
             NEXT_PUBLIC_DISCORD_PERMISSIONS="$NEXT_PUBLIC_DISCORD_PERMISSIONS" \
             --config fly.prod.toml
-          flyctl deploy --config fly.prod.toml --remote-only
+
+          flyctl deploy --config fly.prod.toml --remote-only \
+            --build-arg NEXT_PUBLIC_ENV="$NEXT_PUBLIC_ENV" \
+            --build-arg NEXT_PUBLIC_DISCORD_CLIENT_ID="$NEXT_PUBLIC_DISCORD_CLIENT_ID" \
+            --build-arg NEXT_PUBLIC_DISCORD_SCOPES="$NEXT_PUBLIC_DISCORD_SCOPES" \
+            --build-arg NEXT_PUBLIC_DISCORD_PERMISSIONS="$NEXT_PUBLIC_DISCORD_PERMISSIONS"
+
           flyctl apps restart matchmaker-site
