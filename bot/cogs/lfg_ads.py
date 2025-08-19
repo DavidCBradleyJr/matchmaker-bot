@@ -272,8 +272,7 @@ class LfgAds(commands.Cog):
 
                 embed = discord.Embed(
                     title=" ".join(title_bits),
-                    description=(notes or "Looking for teammates!")
-                                + "\n\n[🔗 Powered by Matchmaker](https://matchmaker.gg)",
+                    description=(notes or "Looking for teammates!"),
                     color=discord.Color.blurple(),
                 )
                 embed.set_author(
@@ -281,8 +280,8 @@ class LfgAds(commands.Cog):
                     icon_url=interaction.user.display_avatar.url,
                 )
                 embed.set_footer(
-                    text=f"Posted by {interaction.user} • Ad #{ad_id} • Powered by Matchmaker",
-                    icon_url="https://matchmaker.gg/favicon.ico"
+                    text=f"Posted by {interaction.user} • Ad #{ad_id} • Powered by Matchmaker](https://matchmaker-site.fly.dev/)",
+                    icon_url="https://i.imgur.com/4x9pIr0.png"
                 )
 
                 async with pool.acquire() as conn:
