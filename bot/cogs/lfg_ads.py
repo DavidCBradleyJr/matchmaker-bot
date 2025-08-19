@@ -10,6 +10,7 @@ from discord import app_commands, ui
 from discord.ext import commands
 
 from ..db import get_pool
+from ..ui.dm_styles import send_pretty_interest_dm  # import the helper
 
 # ---------------------
 # Logging
@@ -27,22 +28,11 @@ LOGGER.setLevel(logging.INFO)
 # Config
 # ---------------------
 
-# Overall time we allow for inserting + broadcasting the ad before showing a timeout to the user.
 POST_TIMEOUT_SECONDS = int(os.getenv("LFG_POST_TIMEOUT_SECONDS", "60"))
-
-# --- Anti-spam tunable ---
 USER_COOLDOWN_SEC = 5 * 60  # 1 post per user per 5 minutes
-
-
-# Max concurrent channel sends to avoid rate-limit spikes
 MAX_SEND_CONCURRENCY = int(os.getenv("LFG_POST_MAX_CONCURRENCY", "5"))
-
-# Per-channel send timeout (seconds)
 PER_SEND_TIMEOUT = int(os.getenv("LFG_POST_PER_SEND_TIMEOUT", "8"))
-
-# If set (e.g. "1"), include a short exception typename in the ephemeral error to help debugging
 SURFACE_ERROR_CODE = os.getenv("LFG_SURFACE_ERROR_CODE", "1") == "1"
-
 
 # ---------------------
 # Utilities
@@ -55,12 +45,6 @@ async def safe_ack(
     ephemeral: bool = True,
     use_thinking: bool = True,
 ) -> bool:
-    """
-    Safely acknowledge an interaction exactly once.
-    Returns:
-      True  -> we successfully acknowledged (you may use followups / edits)
-      False -> token invalidated or already acked elsewhere (avoid followups/edits)
-    """
     try:
         if interaction.response.is_done():
             if message:
@@ -71,10 +55,8 @@ async def safe_ack(
             return True
         else:
             if message:
-                # Visible immediate message (better UX during deploys than a spinner)
                 await interaction.response.send_message(message, ephemeral=ephemeral)
             else:
-                # "thinking" shows the visible spinner; keep False when you don't want a bubble
                 await interaction.response.defer(ephemeral=ephemeral, thinking=use_thinking)
             return True
     except discord.InteractionResponded:
@@ -86,12 +68,10 @@ async def safe_ack(
 
 
 def _err_code(prefix: str, exc: BaseException | None = None) -> str:
-    """Short error identifier to surface to the user (optional)."""
     if not SURFACE_ERROR_CODE:
         return ""
     typ = type(exc).__name__ if exc else ""
     return f" ({prefix}:{typ})" if typ else f" ({prefix})"
-
 
 # ---------------------
 # Button View
@@ -104,9 +84,7 @@ class ConnectButton(ui.View):
 
     @ui.button(label="I’m interested", style=discord.ButtonStyle.success, custom_id="lfg:connect")
     async def connect(self, interaction: discord.Interaction, button: ui.Button):
-        # ACK early, but silently (no spinner bubble)
         acked = await safe_ack(interaction, message=None, ephemeral=True, use_thinking=False)
-
         sent_followup = False
         try:
             user = interaction.user
@@ -114,7 +92,6 @@ class ConnectButton(ui.View):
             if pool is None:
                 raise RuntimeError("DB pool is not initialized; check DATABASE_URL and pool init in main().")
 
-            # Atomically switch ad to connected; first click wins.
             async with pool.acquire() as conn:
                 ad = await conn.fetchrow(
                     """
@@ -137,7 +114,6 @@ class ConnectButton(ui.View):
                     sent_followup = True
                 return
 
-            # DM both parties (best-effort; failures are swallowed)
             owner_id = int(ad["author_id"])
             owner_user = interaction.client.get_user(owner_id) or await interaction.client.fetch_user(owner_id)
 
@@ -151,14 +127,18 @@ class ConnectButton(ui.View):
                     LOGGER.info("Owner DM failed; continuing", exc_info=True)
 
             try:
-                await user.send(
-                    f"✅ I connected you with **{ad['author_name']}** for **{ad['game']}**.\n"
-                    f"Start a chat here: <@{owner_id}>"
+                await send_pretty_interest_dm(
+                    recipient=user,
+                    poster=owner_user,
+                    ad_id=self.ad_id,
+                    game=ad["game"],
+                    notes=ad["notes"],
+                    message_jump=interaction.message.jump_url if interaction.message else None,
+                    guild=interaction.guild,
                 )
             except Exception:
                 LOGGER.info("Connector DM failed; continuing", exc_info=True)
 
-            # Include a jump link back to the exact message the user clicked
             jump = None
             try:
                 if interaction.message:
@@ -192,7 +172,6 @@ class ConnectButton(ui.View):
                 except Exception:
                     pass
 
-
 # ---------------------
 # Cog + Commands
 # ---------------------
@@ -220,20 +199,11 @@ class LfgAds(commands.Cog):
         region: str | None = None,
         notes: str | None = None,
     ):
-        """
-        Flow:
-        - Send an immediate ephemeral "Posting your ad…" (visible, not a spinner)
-        - Within a timeout, insert ad + broadcast to configured guild channels (concurrent with a cap)
-        - Edit the original message to the final result (success or guidance)
-        """
-        # Send the initial message (so deploy interrupts don't leave a spinner)
         acked = await safe_ack(interaction, message="Posting your ad…", ephemeral=True, use_thinking=False)
         if not acked:
             return
 
         async def do_post_work() -> int:
-            """Insert the ad, broadcast it, and return the number of servers posted to."""
-            # --- DB INSERT + SETTINGS FETCH ---
             pool = get_pool()
             if pool is None:
                 raise RuntimeError("DB pool is not initialized; check DATABASE_URL and pool init in main().")
@@ -273,7 +243,10 @@ class LfgAds(commands.Cog):
                     name=str(interaction.user),
                     icon_url=interaction.user.display_avatar.url,
                 )
-                embed.set_footer(text=f"Posted by {interaction.user} • Ad #{ad_id}")
+                embed.set_footer(
+                    text=f"Posted by {interaction.user} • Ad #{ad_id} • Powered by Matchmaker",
+                    icon_url="https://i.imgur.com/4x9pIr0.png"
+                )
 
                 async with pool.acquire() as conn:
                     rows = await conn.fetch(
@@ -283,7 +256,6 @@ class LfgAds(commands.Cog):
                 LOGGER.error("Building embed or guild settings query failed:\n%s", traceback.format_exc())
                 raise RuntimeError("GUILD_QUERY") from exc
 
-            # --- BROADCAST (CONCURRENT WITH CAP) ---
             view = ConnectButton(ad_id=ad_id)
             sem = asyncio.Semaphore(MAX_SEND_CONCURRENCY)
             posted_count = 0
@@ -327,7 +299,6 @@ class LfgAds(commands.Cog):
                 pass
             return
         except Exception as exc:
-            # Any error inside do_post_work gets logged there; we surface a short code here.
             try:
                 await interaction.edit_original_response(
                     content="Something went wrong while posting your ad. Please try again." + _err_code("POST", exc)
@@ -336,7 +307,6 @@ class LfgAds(commands.Cog):
                 pass
             return
 
-        # Build and send the final result (edit the original message)
         try:
             if posted == 0:
                 await interaction.edit_original_response(
@@ -355,9 +325,7 @@ class LfgAds(commands.Cog):
         except (discord.NotFound, discord.HTTPException):
             pass
 
-
     async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-        """Handle errors for this cog's app commands."""
         if isinstance(error, app_commands.CommandOnCooldown):
             retry = int(error.retry_after)
             msg = f"⏳ Slow down! You can post again in **{retry}s**."
@@ -378,7 +346,6 @@ class LfgAds(commands.Cog):
                 "Something went wrong while posting your ad. Please try again.",
                 ephemeral=True,
             )
-
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(LfgAds(bot), override=True)
