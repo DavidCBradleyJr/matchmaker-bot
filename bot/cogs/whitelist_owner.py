@@ -3,13 +3,13 @@ from __future__ import annotations
 import logging
 import os
 import traceback
-from typing import Optional
+from typing import Set
 
 import discord
-from discord import app_commands
 from discord.ext import commands
 
-from ..db import get_pool
+from .. import config
+from ..db import get_allowed_guilds, add_allowed_guilds, remove_allowed_guilds
 
 LOGGER = logging.getLogger(__name__)
 if not LOGGER.handlers:
@@ -17,119 +17,112 @@ if not LOGGER.handlers:
     LOGGER.addHandler(h)
 LOGGER.setLevel(logging.INFO)
 
-OWNER_ID = int(os.getenv("OWNER_ID", "0"))  # set this env var to your Discord user ID
+OWNER_ID = int(os.getenv("OWNER_ID", "0"))  # set this to YOUR Discord user ID
 
 
-def owner_only():
-    async def predicate(interaction: discord.Interaction) -> bool:
-        return int(interaction.user.id) == OWNER_ID and OWNER_ID != 0
-    return app_commands.check(predicate)
+def is_owner():
+    async def predicate(ctx: commands.Context) -> bool:
+        return OWNER_ID != 0 and int(ctx.author.id) == OWNER_ID
+    return commands.check(predicate)
 
 
-class WhitelistOwner(commands.Cog):
+def _parse_ids(arg: str) -> Set[int]:
+    # supports "123,456  , 789"
+    return {int(x) for x in arg.replace(" ", "").split(",") if x}
+
+
+class Allowlist(commands.Cog):
     """
-    Whitelist management — visible and executable by the bot OWNER only.
-    Set env OWNER_ID to your Discord user id.
+    Owner-only allowlist management (prefix commands, hidden from slash picker).
+    Staging-only per your config.ENVIRONMENT.
+    Usage:
+      !al add 123,456,789
+      !al remove 123,456
+      !al list
     """
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    whitelist = app_commands.Group(
-        name="whitelist",
-        description="Whitelist controls (owner only).",
-    )
-
-    async def _ensure_table(self):
-        pool = get_pool()
-        if pool is None:
-            raise RuntimeError("DB pool not initialized.")
-        async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS whitelist (
-                    user_id BIGINT PRIMARY KEY,
-                    added_by BIGINT,
-                    added_at TIMESTAMPTZ DEFAULT NOW()
-                );
-                """
-            )
-
-    @whitelist.command(name="add", description="Add a user to the whitelist (owner only).")
-    @owner_only()
-    async def add(self, interaction: discord.Interaction, user: discord.User):
+    async def _dm_owner(self, ctx: commands.Context, content: str):
         try:
-            await self._ensure_table()
-            pool = get_pool()
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    """
-                    INSERT INTO whitelist (user_id, added_by)
-                    VALUES ($1, $2)
-                    ON CONFLICT (user_id) DO NOTHING
-                    """,
-                    int(user.id),
-                    int(interaction.user.id),
-                )
-            await interaction.response.send_message(
-                f"✅ Added {user.mention} (`{user.id}`) to whitelist.", ephemeral=True
-            )
+            await ctx.author.send(content)
         except Exception:
-            LOGGER.error("whitelist add failed:\n%s", traceback.format_exc())
-            await interaction.response.send_message(
-                "Something went wrong while updating the whitelist. Please try again.",
-                ephemeral=True,
-            )
+            LOGGER.info("Failed to DM owner allowlist result", exc_info=True)
 
-    @whitelist.command(name="remove", description="Remove a user from the whitelist (owner only).")
-    @owner_only()
-    async def remove(self, interaction: discord.Interaction, user: discord.User):
+    async def _delete_invocation(self, ctx: commands.Context):
         try:
-            await self._ensure_table()
-            pool = get_pool()
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "DELETE FROM whitelist WHERE user_id = $1",
-                    int(user.id),
-                )
-            await interaction.response.send_message(
-                f"🗑️ Removed {user.mention} (`{user.id}`) from whitelist.", ephemeral=True
-            )
+            if ctx.guild and ctx.message and ctx.channel.permissions_for(ctx.guild.me).manage_messages:
+                await ctx.message.delete()
         except Exception:
-            LOGGER.error("whitelist remove failed:\n%s", traceback.format_exc())
-            await interaction.response.send_message(
-                "Something went wrong while updating the whitelist. Please try again.",
-                ephemeral=True,
-            )
+            pass
 
-    @whitelist.command(name="view", description="View the whitelist (owner only).")
-    @owner_only()
-    async def view(self, interaction: discord.Interaction):
+    @commands.group(name="al", invoke_without_command=True, hidden=True)
+    @is_owner()
+    async def al_group(self, ctx: commands.Context):
+        if config.ENVIRONMENT != "staging":
+            await self._dm_owner(ctx, "This command is staging‑only.")
+            await self._delete_invocation(ctx)
+            return
+        await self._dm_owner(ctx,
+            "Allowlist controls:\n"
+            "• `!al add 123,456,789`\n"
+            "• `!al remove 123,456`\n"
+            "• `!al list`"
+        )
+        await self._delete_invocation(ctx)
+
+    @al_group.command(name="add", hidden=True)
+    @is_owner()
+    async def al_add(self, ctx: commands.Context, guild_ids: str):
+        if config.ENVIRONMENT != "staging":
+            await self._dm_owner(ctx, "This command is staging‑only.")
+            await self._delete_invocation(ctx)
+            return
         try:
-            await self._ensure_table()
-            pool = get_pool()
-            async with pool.acquire() as conn:
-                rows = await conn.fetch("SELECT user_id, added_by, added_at FROM whitelist ORDER BY added_at DESC")
-            if not rows:
-                return await interaction.response.send_message("Whitelist is empty.", ephemeral=True)
-
-            # Build a small list string, keep minimal
-            lines = []
-            for r in rows[:50]:  # cap to avoid huge messages
-                uid = int(r["user_id"])
-                adder = int(r["added_by"]) if r["added_by"] is not None else None
-                when = r["added_at"].strftime("%Y-%m-%d")
-                lines.append(f"• `<@{uid}>` ({uid}) — added {when}" + (f" by <@{adder}>" if adder else ""))
-
-            msg = "### Whitelist\n" + "\n".join(lines)
-            await interaction.response.send_message(msg, ephemeral=True)
+            ids = _parse_ids(guild_ids)
+            added = await add_allowed_guilds("staging", ids)
+            await self._dm_owner(ctx, f"✅ Added/updated **{added}** guild(s) to the staging allowlist.")
         except Exception:
-            LOGGER.error("whitelist view failed:\n%s", traceback.format_exc())
-            await interaction.response.send_message(
-                "Something went wrong while reading the whitelist. Please try again.",
-                ephemeral=True,
-            )
+            LOGGER.error("allowlist add failed:\n%s", traceback.format_exc())
+            await self._dm_owner(ctx, "Something went wrong while updating the allowlist. Please try again.")
+        finally:
+            await self._delete_invocation(ctx)
+
+    @al_group.command(name="remove", hidden=True)
+    @is_owner()
+    async def al_remove(self, ctx: commands.Context, guild_ids: str):
+        if config.ENVIRONMENT != "staging":
+            await self._dm_owner(ctx, "This command is staging‑only.")
+            await self._delete_invocation(ctx)
+            return
+        try:
+            ids = _parse_ids(guild_ids)
+            removed = await remove_allowed_guilds("staging", ids)
+            await self._dm_owner(ctx, f"🗑️ Removed **{removed}** guild(s) from the staging allowlist.")
+        except Exception:
+            LOGGER.error("allowlist remove failed:\n%s", traceback.format_exc())
+            await self._dm_owner(ctx, "Something went wrong while updating the allowlist. Please try again.")
+        finally:
+            await self._delete_invocation(ctx)
+
+    @al_group.command(name="list", hidden=True)
+    @is_owner()
+    async def al_list(self, ctx: commands.Context):
+        if config.ENVIRONMENT != "staging":
+            await self._dm_owner(ctx, "This command is staging‑only.")
+            await self._delete_invocation(ctx)
+            return
+        try:
+            ids = await get_allowed_guilds("staging")
+            text = ", ".join(str(i) for i in sorted(ids)) or "— (empty) —"
+            await self._dm_owner(ctx, f"Staging allowlist:\n`{text}`")
+        except Exception:
+            LOGGER.error("allowlist list failed:\n%s", traceback.format_exc())
+            await self._dm_owner(ctx, "Something went wrong while reading the allowlist. Please try again.")
+        finally:
+            await self._delete_invocation(ctx)
 
 
 async def setup(bot: commands.Bot):
-    await bot.add_cog(WhitelistOwner(bot))
+    await bot.add_cog(Allowlist(bot))
