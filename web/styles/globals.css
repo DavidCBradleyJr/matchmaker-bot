@@ -2,4 +2,6 @@
 @tailwind components;
 @tailwind utilities;
 
-:root { --brand: 99 102 241; }
+:root {
+  --radius: 1rem; /* ≈ rounded-2xl */
+}

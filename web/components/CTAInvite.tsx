@@ -1,38 +1,68 @@
-export const dynamic = 'force-dynamic'; // render at runtime, not during build
-export const revalidate = 0;
+"use client";
 
-export default function CTAInvite() {
-  const env   = process.env.NEXT_PUBLIC_ENV || 'production';
-  const cid   = process.env.NEXT_PUBLIC_DISCORD_CLIENT_ID;
-  const scope = process.env.NEXT_PUBLIC_DISCORD_SCOPES || 'bot%20applications.commands';
-  const perms = process.env.NEXT_PUBLIC_DISCORD_PERMISSIONS || '274877991936';
+import { memo, useMemo } from "react";
 
-  const inviteUrl = cid
-    ? `https://discord.com/api/oauth2/authorize?client_id=${cid}&permissions=${perms}&scope=${scope}`
-    : null;
+type Props = {
+  clientId?: string;
+  redirectUri?: string;
+  permissions?: string;
+  className?: string;
+};
+
+function CTAInviteImpl({
+  clientId = process.env.NEXT_PUBLIC_DISCORD_CLIENT_ID,
+  redirectUri,
+  permissions,
+  className = "",
+}: Props) {
+  const inviteUrl = useMemo(() => {
+    if (!clientId) return null;
+
+    const params = new URLSearchParams({
+      client_id: clientId,
+      scope: "bot applications.commands",
+    });
+
+    if (permissions) params.set("permissions", permissions);
+    if (redirectUri) params.set("redirect_uri", redirectUri);
+
+    return `https://discord.com/oauth2/authorize?${params.toString()}`;
+  }, [clientId, permissions, redirectUri]);
+
+  if (!inviteUrl) {
+    return (
+      <span
+        title="Missing Discord client id — set NEXT_PUBLIC_DISCORD_CLIENT_ID in .env.local"
+        className={`inline-flex cursor-not-allowed select-none items-center gap-2 rounded-2xl bg-zinc-300/40 px-5 py-3 text-sm font-medium text-zinc-600 dark:bg-zinc-700/40 dark:text-zinc-300 ${className}`}
+      >
+        Invite (coming soon)
+      </span>
+    );
+  }
 
   return (
-    <div className="inline-flex items-center gap-3">
-      {inviteUrl ? (
-        <a
-          href={inviteUrl}
-          target="_blank"
-          rel="noreferrer"
-          className="inline-flex items-center justify-center rounded-xl border border-indigo-400/30 bg-indigo-500/20 px-5 py-3 text-indigo-200 hover:bg-indigo-500/30"
-        >
-          Add the Bot to Your Server
-        </a>
-      ) : (
-        <span className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-2 text-sm">
-          Invite unavailable (missing client id)
-        </span>
-      )}
-
-      {env === 'staging' && (
-        <span className="rounded-md border border-yellow-400/30 bg-yellow-500/10 px-2 py-1 text-xs text-yellow-200">
-          STAGING
-        </span>
-      )}
-    </div>
+    <a
+      href={inviteUrl}
+      className={`inline-flex items-center gap-2 rounded-2xl bg-primary px-5 py-3 text-sm font-medium text-primary-foreground shadow-sm transition-opacity hover:opacity-90 ${className}`}
+    >
+      Add to Discord
+      <svg
+        viewBox="0 0 24 24"
+        aria-hidden="true"
+        className="h-[18px] w-[18px]"
+      >
+        <path
+          d="M13 5l7 7-7 7M5 12h14"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    </a>
   );
 }
+
+const CTAInvite = memo(CTAInviteImpl);
+export default CTAInvite;
