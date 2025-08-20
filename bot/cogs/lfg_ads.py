@@ -10,6 +10,8 @@ from discord import app_commands, ui
 from discord.ext import commands
 
 from ..db import get_pool
+import bot.db as db
+
 from ..ui.dm_styles import send_pretty_interest_dm  # import the helper
 
 # ---------------------
@@ -104,6 +106,7 @@ class ConnectButton(ui.View):
                     str(user),
                     self.ad_id,
                 )
+                await db.stats_inc("connections_made", 1)
 
             if not ad:
                 if acked:
@@ -322,6 +325,7 @@ class LfgAds(commands.Cog):
                         f"\n• **Servers posted to:** {posted}"
                     )
                 )
+                await db.stats_inc("ads_posted", 1)
         except (discord.NotFound, discord.HTTPException):
             pass
 
