@@ -1,5 +1,4 @@
-import Link from "next/link";
-
+// web/components/Footer.tsx
 export default function Footer() {
   return (
     <footer className="border-t border-neutral-900">
@@ -10,10 +9,7 @@ export default function Footer() {
           <span className="text-neutral-600">© {new Date().getFullYear()}</span>
         </div>
         <div className="flex flex-wrap items-center gap-4">
-          <Link href="https://github.com/DavidCBradleyJr/matchmaker-bot" target="_blank" className="hover:text-white">
-            GitHub
-          </Link>
-          <Link href="/api/invite" className="hover:text-white">Add to Discord</Link>
+          <a href="/api/invite" className="hover:text-white">Add to Discord</a>
         </div>
       </div>
     </footer>

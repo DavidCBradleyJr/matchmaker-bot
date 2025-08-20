@@ -5,7 +5,6 @@ import asyncpg
 
 _pool: asyncpg.Pool | None = None
 
-# ---------------- existing schema (unchanged) ----------------
 CREATE_SQL = """
 CREATE TABLE IF NOT EXISTS allowed_guilds (
   id BIGINT PRIMARY KEY,
@@ -59,9 +58,8 @@ async def init_pool(dsn: str) -> None:
     global _pool
     _pool = await asyncpg.create_pool(dsn, min_size=1, max_size=4)
     async with _pool.acquire() as conn:
-        # keep your original create
         await conn.execute(CREATE_SQL)
-        # add stats tables without modifying the original CREATE_SQL
+        # Ensure stats tables too (minimal change)
         await conn.execute(CREATE_STATS_SQL)
 
 def get_pool() -> asyncpg.Pool:
@@ -102,7 +100,6 @@ async def remove_allowed_guilds(environment: str, guild_ids: Iterable[int]) -> i
             environment,
             list(map(int, guild_ids)),
         )
-        # result is like "DELETE 2"
         return int(result.split()[-1])
 
 # ---------------- NEW: stats helpers -------------------------

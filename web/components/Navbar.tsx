@@ -1,3 +1,4 @@
+// web/components/Navbar.tsx
 import Link from "next/link";
 
 export default function Navbar() {
@@ -11,9 +12,6 @@ export default function Navbar() {
         <div className="hidden md:flex items-center gap-6 text-sm text-neutral-300">
           <Link href="#features" className="hover:text-white">Features</Link>
           <Link href="#how" className="hover:text-white">How it works</Link>
-          <Link href="https://github.com/DavidCBradleyJr/matchmaker-bot" className="hover:text-white" target="_blank">
-            GitHub
-          </Link>
         </div>
         <div className="flex items-center gap-3">
           <a

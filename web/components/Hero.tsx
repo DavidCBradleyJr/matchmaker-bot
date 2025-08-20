@@ -2,6 +2,9 @@
 import { motion } from "framer-motion";
 import AnimatedBackground from "./AnimatedBackground";
 import Link from "next/link";
+import dynamic from "next/dynamic";
+
+const Stats = dynamic(() => import("./Stats"), { ssr: true });
 
 export default function Hero() {
   return (
@@ -58,38 +61,7 @@ export default function Hero() {
             transition={{ duration: 0.5, delay: 0.1 }}
             className="relative rounded-2xl border border-neutral-800 bg-neutral-900/60 p-6 shadow-xl"
           >
-            {/* Hero visual: compact mock of an LFG card */}
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <div className="font-semibold">/lfg post</div>
-                <span className="text-xs text-neutral-400">public</span>
-              </div>
-              <div className="rounded-xl bg-neutral-800/60 p-4">
-                <div className="text-sm text-neutral-300">
-                  <span className="text-emerald-400 font-semibold">Valorant</span> — Need 2 for ranked, VC preferred.
-                </div>
-                <div className="mt-3 flex items-center justify-between">
-                  <div className="text-xs text-neutral-400">by @neo • 2m ago</div>
-                  <button className="rounded-lg px-3 py-1.5 bg-emerald-600/80 hover:bg-emerald-500 text-sm">
-                    Connect
-                  </button>
-                </div>
-              </div>
-              <div className="grid grid-cols-3 gap-3 text-center text-xs">
-                <div className="rounded-lg bg-neutral-800/60 p-3">
-                  <div className="text-neutral-200 font-semibold">1.2k</div>
-                  <div className="text-neutral-500">matches</div>
-                </div>
-                <div className="rounded-lg bg-neutral-800/60 p-3">
-                  <div className="text-neutral-200 font-semibold">350+</div>
-                  <div className="text-neutral-500">servers</div>
-                </div>
-                <div className="rounded-lg bg-neutral-800/60 p-3">
-                  <div className="text-neutral-200 font-semibold">24/7</div>
-                  <div className="text-neutral-500">uptime</div>
-                </div>
-              </div>
-            </div>
+            <Stats />
           </motion.div>
         </div>
       </div>
