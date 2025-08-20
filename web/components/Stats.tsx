@@ -1,15 +1,16 @@
 type Stats = {
   ok: boolean;
-  servers: number;
-  ads_posted: number;
-  connections_made: number;
-  matches_made: number;
+  servers: number | string;
+  ads_posted: number | string;
+  connections_made: number | string;
+  matches_made: number | string;
   bot_start_time: string;
   uptime_seconds: number;
 };
 
-function fmt(n: number) {
-  return new Intl.NumberFormat().format(n);
+function fmt(n: number | string) {
+  const num = typeof n === "string" ? Number(n) : n;
+  return new Intl.NumberFormat().format(num || 0);
 }
 function fmtUptime(s: number) {
   const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600);
@@ -24,9 +25,9 @@ export default async function Stats() {
   if (!data.ok) return null;
 
   const items = [
-    { label: "Servers", value: fmt(Number(data.servers || 0)) },
-    { label: "Ads posted", value: fmt(Number(data.ads_posted || 0)) },
-    { label: "Connections", value: fmt(Number(data.connections_made || 0)) },
+    { label: "Servers", value: fmt(data.servers) },
+    { label: "Ads posted", value: fmt(data.ads_posted) },
+    { label: "Connections", value: fmt(data.connections_made) },
     { label: "Uptime", value: fmtUptime(Number(data.uptime_seconds || 0)) },
   ];
 
