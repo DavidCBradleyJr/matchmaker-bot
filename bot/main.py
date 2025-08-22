@@ -5,7 +5,7 @@ import discord
 from discord.ext import commands
 
 from bot import config
-from bot.db import init_pool, get_allowed_guilds
+from bot.db import init_pool, get_allowed_guilds, init_pool_from_env
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("bot")
@@ -21,7 +21,7 @@ class Bot(commands.Bot):
     async def setup_hook(self):
         # Connect DB (if configured) and create tables
         if config.DATABASE_URL:
-            await init_pool(config.DATABASE_URL)
+            await init_pool_from_env()
 
         # Load cogs
         # await self.load_extension("bot.cogs.lfg")

@@ -1,18 +1,16 @@
-import Link from "next/link";
-
+// web/components/Footer.tsx
 export default function Footer() {
-  const year = new Date().getFullYear();
   return (
-    <footer className="border-t border-white/10">
-      <div className="mx-auto flex max-w-6xl flex-col gap-2 p-6 text-sm opacity-80 md:flex-row md:items-center md:justify-between">
-        <div>© {year} Matchmaker Bot. Production bot only — premium coming soon.</div>
-        <nav className="flex items-center gap-4">
-          <Link href="/about" className="hover:opacity-100 opacity-80">About</Link>
-          <Link href="/install" className="hover:opacity-100 opacity-80">Install</Link>
-          <Link href="/privacy" className="hover:opacity-100 opacity-80">Privacy</Link>
-          <Link href="/terms" className="hover:opacity-100 opacity-80">Terms</Link>
-          <Link href="/contact" className="hover:opacity-100 opacity-80">Contact</Link>
-        </nav>
+    <footer className="border-t border-neutral-900">
+      <div className="mx-auto max-w-7xl px-4 py-10 flex flex-col md:flex-row gap-6 md:items-center md:justify-between text-sm text-neutral-400">
+        <div className="flex items-center gap-2">
+          <span className="inline-block h-2 w-2 rounded-full bg-emerald-400" />
+          <span>Matchmaker Bot</span>
+          <span className="text-neutral-600">© {new Date().getFullYear()}</span>
+        </div>
+        <div className="flex flex-wrap items-center gap-4">
+          <a href="/api/invite" className="hover:text-white">Add to Discord</a>
+        </div>
       </div>
     </footer>
   );
