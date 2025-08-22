@@ -3,7 +3,6 @@ import { NextResponse, NextRequest } from "next/server";
 function pickClientId(host?: string | null): string | null {
   const h = (host || "").toLowerCase();
 
-  // Heuristic for staging; tighten if you have exact hostnames.
   const isStaging =
     h.includes("staging") || h.startsWith("stg.") || h.includes("-staging");
 
