@@ -1,25 +1,22 @@
-// web/app/api/stats/route.ts
 import { NextResponse } from "next/server";
 
-type Stats = {
-  guilds: number;
-  lfgAdsPosted: number;
-  connectionsMade: number;
-  activeServersToday: number;
-  updatedAt: string; // ISO
+const toNum = (v: unknown, fallback = 0) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
 };
 
-const parseNum = (v: string | undefined): number =>
-  v && !Number.isNaN(Number(v)) ? Number(v) : 0;
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 export async function GET() {
   try {
-    const envStats: Stats = {
-      guilds: parseNum(process.env.NEXT_PUBLIC_SEED_STATS_GUILDS),
-      lfgAdsPosted: parseNum(process.env.NEXT_PUBLIC_SEED_STATS_ADS),
-      connectionsMade: parseNum(process.env.NEXT_PUBLIC_SEED_STATS_CONNECTIONS),
-      activeServersToday: parseNum(process.env.NEXT_PUBLIC_SEED_STATS_ACTIVE),
-      updatedAt: new Date().toISOString(),
+    let payload = {
+      servers: toNum(process.env.NEXT_PUBLIC_SEED_STATS_GUILDS),
+      ads_posted: toNum(process.env.NEXT_PUBLIC_SEED_STATS_ADS),
+      connections_made: toNum(process.env.NEXT_PUBLIC_SEED_STATS_CONNECTIONS),
+      matches_made: toNum(process.env.NEXT_PUBLIC_SEED_STATS_MATCHES),
+      bot_start_time: process.env.NEXT_PUBLIC_SEED_STATS_STARTED_AT || "",
+      uptime_seconds: toNum(process.env.NEXT_PUBLIC_SEED_STATS_UPTIME),
     };
 
     const METRICS_URL = process.env.STATS_SOURCE_URL;
@@ -27,22 +24,26 @@ export async function GET() {
       const r = await fetch(METRICS_URL, { cache: "no-store" });
       if (r.ok) {
         const m = await r.json();
-        envStats.guilds = Number(m.guilds ?? envStats.guilds);
-        envStats.lfgAdsPosted = Number(m.lfgAdsPosted ?? envStats.lfgAdsPosted);
-        envStats.connectionsMade = Number(m.connectionsMade ?? envStats.connectionsMade);
-        envStats.activeServersToday = Number(m.activeServersToday ?? envStats.activeServersToday);
-        envStats.updatedAt = new Date().toISOString();
+        payload = {
+          servers: toNum(m.servers ?? m.guilds, payload.servers),
+          ads_posted: toNum(m.ads_posted ?? m.lfgAdsPosted, payload.ads_posted),
+          connections_made: toNum(m.connections_made ?? m.matches_made, payload.connections_made),
+          matches_made: toNum(m.matches_made ?? m.connections_made, payload.matches_made),
+          bot_start_time: m.bot_start_time ?? m.startedAt ?? payload.bot_start_time,
+          uptime_seconds: toNum(m.uptime_seconds ?? m.uptime, payload.uptime_seconds),
+        };
       }
     }
 
-    return NextResponse.json(envStats, { status: 200 });
+    return NextResponse.json({ ok: true, ...payload, updated_at: new Date().toISOString() });
   } catch (err) {
     return NextResponse.json(
       {
+        ok: false,
         error: "STATS_API_ERROR",
         message: err instanceof Error ? err.message : "Unknown error",
       },
-      { status: 500 }
+      { status: 200 }
     );
   }
 }
