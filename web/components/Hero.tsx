@@ -2,9 +2,7 @@
 import { motion } from "framer-motion";
 import AnimatedBackground from "./AnimatedBackground";
 import Link from "next/link";
-import dynamic from "next/dynamic";
-
-const Stats = dynamic(() => import("./Stats"), { ssr: true });
+import Stats from "./Stats";
 
 export default function Hero() {
   return (

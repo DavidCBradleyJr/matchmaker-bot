@@ -1,91 +1,47 @@
 // web/app/api/stats/route.ts
 import { NextResponse } from "next/server";
-import { Pool } from "pg";
 
-function resolveDsn() {
-  const env = (process.env.ENV || "staging").toLowerCase();
-  if (env.startsWith("stag")) {
-    return process.env.STAGING_DATABASE_URL || process.env.PROD_DATABASE_URL || "";
-  }
-  return process.env.PROD_DATABASE_URL || process.env.STAGING_DATABASE_URL || "";
-}
+type Stats = {
+  guilds: number;
+  lfgAdsPosted: number;
+  connectionsMade: number;
+  activeServersToday: number;
+  updatedAt: string; // ISO
+};
 
-let pool: Pool | null = null;
-function getPool() {
-  if (!pool) {
-    const dsn = resolveDsn();
-    if (!dsn) return null;
-    pool = new Pool({
-      connectionString: dsn,
-      ssl: { rejectUnauthorized: false },
-      max: 3,
-      idleTimeoutMillis: 10_000,
-    });
-  }
-  return pool;
-}
-
-// Force Node runtime (pg requires it)
-export const runtime = "nodejs";
-
-const CREATE_STATS_SQL = `
-CREATE TABLE IF NOT EXISTS bot_guilds (
-  guild_id BIGINT PRIMARY KEY
-);
-CREATE TABLE IF NOT EXISTS bot_counters (
-  metric TEXT PRIMARY KEY,
-  value BIGINT NOT NULL DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS bot_meta (
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-);
-`;
+const parseNum = (v: string | undefined): number =>
+  v && !Number.isNaN(Number(v)) ? Number(v) : 0;
 
 export async function GET() {
   try {
-    const p = getPool();
-    if (!p) {
-      return NextResponse.json(
-        { ok: false, error: "Database not configured (missing ENV/DSN)" },
-        { status: 500 }
-      );
-    }
-    // Ensure schema so this works even before the bot writes anything
-    await p.query(CREATE_STATS_SQL);
-
-    const { rows } = await p.query(`
-      SELECT
-        (SELECT COUNT(*)::bigint FROM bot_guilds) AS servers,
-        COALESCE((SELECT value FROM bot_counters WHERE metric='ads_posted'),0)::bigint AS ads_posted,
-        COALESCE((SELECT value FROM bot_counters WHERE metric='connections_made'),0)::bigint AS connections_made,
-        COALESCE((SELECT value FROM bot_counters WHERE metric='matches_made'),0)::bigint AS matches_made,
-        COALESCE((SELECT value FROM bot_meta WHERE key='bot_start_time'),'') AS bot_start_time
-    `);
-
-    const data = rows[0] || {
-      servers: 0,
-      ads_posted: 0,
-      connections_made: 0,
-      matches_made: 0,
-      bot_start_time: "",
+    const envStats: Stats = {
+      guilds: parseNum(process.env.NEXT_PUBLIC_SEED_STATS_GUILDS),
+      lfgAdsPosted: parseNum(process.env.NEXT_PUBLIC_SEED_STATS_ADS),
+      connectionsMade: parseNum(process.env.NEXT_PUBLIC_SEED_STATS_CONNECTIONS),
+      activeServersToday: parseNum(process.env.NEXT_PUBLIC_SEED_STATS_ACTIVE),
+      updatedAt: new Date().toISOString(),
     };
 
-    let uptime_seconds = 0;
-    if (data.bot_start_time) {
-      const started = Date.parse(String(data.bot_start_time));
-      if (!Number.isNaN(started)) {
-        uptime_seconds = Math.max(0, Math.floor((Date.now() - started) / 1000));
+    const METRICS_URL = process.env.STATS_SOURCE_URL;
+    if (METRICS_URL) {
+      const r = await fetch(METRICS_URL, { cache: "no-store" });
+      if (r.ok) {
+        const m = await r.json();
+        envStats.guilds = Number(m.guilds ?? envStats.guilds);
+        envStats.lfgAdsPosted = Number(m.lfgAdsPosted ?? envStats.lfgAdsPosted);
+        envStats.connectionsMade = Number(m.connectionsMade ?? envStats.connectionsMade);
+        envStats.activeServersToday = Number(m.activeServersToday ?? envStats.activeServersToday);
+        envStats.updatedAt = new Date().toISOString();
       }
     }
 
+    return NextResponse.json(envStats, { status: 200 });
+  } catch (err) {
     return NextResponse.json(
-      { ok: true, ...data, uptime_seconds },
-      { headers: { "Cache-Control": "no-store" } }
-    );
-  } catch (err: any) {
-    return NextResponse.json(
-      { ok: false, error: err?.message ?? "Unknown error" },
+      {
+        error: "STATS_API_ERROR",
+        message: err instanceof Error ? err.message : "Unknown error",
+      },
       { status: 500 }
     );
   }
