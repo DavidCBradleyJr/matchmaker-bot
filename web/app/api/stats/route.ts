@@ -1,3 +1,4 @@
+// web/app/api/stats/route.ts
 import { NextResponse } from "next/server";
 import { Pool } from "pg";
 
@@ -24,7 +25,7 @@ function getPool() {
   return pool;
 }
 
-// Force Node runtime (pg needs Node, not Edge)
+// Force Node runtime (pg requires it)
 export const runtime = "nodejs";
 
 const CREATE_STATS_SQL = `

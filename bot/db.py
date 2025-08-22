@@ -17,7 +17,6 @@ def _require_pool() -> asyncpg.Pool:
         raise RuntimeError("DB pool not initialized")
     return _pool
 
-# ---------------- NEW: env-aware DSN helpers -----------------
 ENV = os.getenv("ENV", "staging").lower()
 
 def _resolve_dsn_from_env() -> str | None:
@@ -36,7 +35,6 @@ async def init_pool_from_env() -> None:
         raise RuntimeError("No STAGING_DATABASE_URL or PROD_DATABASE_URL set")
     await init_pool(dsn)
 
-# --------------- NEW: stats schema (separate block) ----------
 CREATE_STATS_SQL = """
 CREATE TABLE IF NOT EXISTS bot_guilds (
   guild_id BIGINT PRIMARY KEY
@@ -59,7 +57,6 @@ async def init_pool(dsn: str) -> None:
     _pool = await asyncpg.create_pool(dsn, min_size=1, max_size=4)
     async with _pool.acquire() as conn:
         await conn.execute(CREATE_SQL)
-        # Ensure stats tables too (minimal change)
         await conn.execute(CREATE_STATS_SQL)
 
 def get_pool() -> asyncpg.Pool:
@@ -102,7 +99,6 @@ async def remove_allowed_guilds(environment: str, guild_ids: Iterable[int]) -> i
         )
         return int(result.split()[-1])
 
-# ---------------- NEW: stats helpers -------------------------
 
 async def stats_add_guild(guild_id: int) -> None:
     pool = _require_pool()

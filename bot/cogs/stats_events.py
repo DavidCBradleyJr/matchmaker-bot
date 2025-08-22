@@ -9,6 +9,7 @@ class StatsEvents(commands.Cog):
 
     @commands.Cog.listener()
     async def on_ready(self):
+        # record start time; sync current guilds
         await db.stats_set_meta("bot_start_time", datetime.now(timezone.utc).isoformat())
         for g in getattr(self.bot, "guilds", []):
             await db.stats_add_guild(g.id)
