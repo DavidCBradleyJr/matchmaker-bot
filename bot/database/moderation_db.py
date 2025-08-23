@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Dict
 
 from asyncpg import (
     UndefinedTableError,
@@ -16,55 +16,24 @@ log = logging.getLogger(__name__)
 
 TABLE_FQN = "public.user_timeouts"  # schema-qualify to avoid search_path surprises
 
-# Cache the detected time column name across calls
-_TIME_COL_NAME: Optional[str] = None
 
+# -------- helpers --------
 
-async def _get_time_col(conn) -> str:
+async def _detect_time_cols(conn) -> Dict[str, bool]:
     """
-    Detect which timestamp column the table uses for the timeout:
-    - preferred: 'until'
-    - legacy:    'expires_at'
-    If neither exists, attempt to add 'until' (DDL permitting), else raise.
+    Return which time columns exist on the table.
+    We support either/both of:
+      - 'until' (preferred new name)
+      - 'expires_at' (legacy)
     """
-    global _TIME_COL_NAME
-    if _TIME_COL_NAME:
-        return _TIME_COL_NAME
-
-    has_until = await conn.fetchval("""
-        SELECT 1 FROM information_schema.columns
-        WHERE table_schema='public' AND table_name='user_timeouts' AND column_name='until'
+    row = await conn.fetchrow("""
+        SELECT
+          EXISTS(SELECT 1 FROM information_schema.columns
+                 WHERE table_schema='public' AND table_name='user_timeouts' AND column_name='until')      AS has_until,
+          EXISTS(SELECT 1 FROM information_schema.columns
+                 WHERE table_schema='public' AND table_name='user_timeouts' AND column_name='expires_at') AS has_expires
     """)
-    has_expires = await conn.fetchval("""
-        SELECT 1 FROM information_schema.columns
-        WHERE table_schema='public' AND table_name='user_timeouts' AND column_name='expires_at'
-    """)
-
-    if has_until:
-        _TIME_COL_NAME = "until"
-        return _TIME_COL_NAME
-    if has_expires:
-        _TIME_COL_NAME = "expires_at"
-        return _TIME_COL_NAME
-
-    # Neither column exists — try to add 'until'
-    try:
-        await conn.execute(f"ALTER TABLE {TABLE_FQN} ADD COLUMN until TIMESTAMPTZ")
-        _TIME_COL_NAME = "until"
-        return _TIME_COL_NAME
-    except InsufficientPrivilegeError:
-        # We can't add the column and none exists — caller should surface a clear error
-        raise RuntimeError("USER_TIMEOUTS_TIME_COLUMN_MISSING")
-    except PostgresError:
-        # Possible race; re-check once
-        has_until = await conn.fetchval("""
-            SELECT 1 FROM information_schema.columns
-            WHERE table_schema='public' AND table_name='user_timeouts' AND column_name='until'
-        """)
-        if has_until:
-            _TIME_COL_NAME = "until"
-            return _TIME_COL_NAME
-        raise RuntimeError("USER_TIMEOUTS_TIME_COLUMN_MISSING")
+    return {"has_until": bool(row["has_until"]), "has_expires": bool(row["has_expires"])}
 
 
 # ---------- Schema management (self-healing, DDL-optional) ----------
@@ -80,7 +49,7 @@ async def ensure_user_timeouts_schema() -> None:
         raise RuntimeError("DB pool is not initialized; check DATABASE_URL and pool init in main().")
 
     async with pool.acquire() as conn:
-        # Create minimal table if possible (no time column yet)
+        # Create minimal table if we can
         try:
             await conn.execute(
                 f"""
@@ -93,44 +62,69 @@ async def ensure_user_timeouts_schema() -> None:
         except InsufficientPrivilegeError:
             log.warning("No DDL privilege to CREATE %s; continuing with column/index checks.", TABLE_FQN)
 
-        # Resolve which time column we have (or can add)
-        try:
-            time_col = await _get_time_col(conn)
-        except RuntimeError as e:
-            # We couldn't find or add a time column; log and return (writes will raise)
-            log.error("Timeouts schema missing time column ('until'/'expires_at'): %s", e)
-            return
-
-        # Columns / constraints / defaults (safe to run multiple times)
-        alter_statements = [
-            # non-time columns
+        # Try to add both time columns as needed (we prefer 'until', but we won't remove 'expires_at')
+        for stmt in (
+            f"ALTER TABLE {TABLE_FQN} ADD COLUMN IF NOT EXISTS until TIMESTAMPTZ",
+            f"ALTER TABLE {TABLE_FQN} ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ",
             f"ALTER TABLE {TABLE_FQN} ADD COLUMN IF NOT EXISTS reason TEXT",
             f"ALTER TABLE {TABLE_FQN} ADD COLUMN IF NOT EXISTS created_by BIGINT",
             f"ALTER TABLE {TABLE_FQN} ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ",
-
-            # Backfill NULLs on time_col and created_at before NOT NULL
-            f"UPDATE {TABLE_FQN} SET {time_col} = NOW() WHERE {time_col} IS NULL",
-            f"UPDATE {TABLE_FQN} SET created_at = NOW() WHERE created_at IS NULL",
-
-            # Enforce NOT NULLS
-            f"ALTER TABLE {TABLE_FQN} ALTER COLUMN {time_col} SET NOT NULL",
-            f"ALTER TABLE {TABLE_FQN} ALTER COLUMN created_at SET NOT NULL",
-
-            # Ensure default so inserts don’t rely on app providing created_at
-            f"ALTER TABLE {TABLE_FQN} ALTER COLUMN created_at SET DEFAULT NOW()",
-
-            # Unique index required by ON CONFLICT (guild_id, user_id)
-            "CREATE UNIQUE INDEX IF NOT EXISTS user_timeouts_guild_user_uidx "
-            f"ON {TABLE_FQN} (guild_id, user_id)",
-        ]
-        for stmt in alter_statements:
+        ):
             try:
                 await conn.execute(stmt)
             except InsufficientPrivilegeError:
                 log.warning("No DDL privilege for: %s", stmt)
             except PostgresError as exc:
-                # Non-fatal: if the column already matches or small race, continue.
                 log.debug("Postgres notice during ensure: %s: %s", type(exc).__name__, exc)
+
+        # Backfill and constraints/defaults
+        cols = await _detect_time_cols(conn)
+        has_until = cols["has_until"]
+        has_expires = cols["has_expires"]
+
+        # If both are present, normalize values so neither is NULL
+        try:
+            if has_until and has_expires:
+                await conn.execute(f"UPDATE {TABLE_FQN} SET expires_at = until WHERE expires_at IS NULL AND until IS NOT NULL")
+                await conn.execute(f"UPDATE {TABLE_FQN} SET until = expires_at WHERE until IS NULL AND expires_at IS NOT NULL")
+            elif has_until:
+                await conn.execute(f"UPDATE {TABLE_FQN} SET until = NOW() WHERE until IS NULL")
+            elif has_expires:
+                await conn.execute(f"UPDATE {TABLE_FQN} SET expires_at = NOW() WHERE expires_at IS NULL")
+        except PostgresError as exc:
+            log.debug("Backfill notice: %s: %s", type(exc).__name__, exc)
+
+        # created_at backfill + default
+        try:
+            await conn.execute(f"UPDATE {TABLE_FQN} SET created_at = NOW() WHERE created_at IS NULL")
+            await conn.execute(f"ALTER TABLE {TABLE_FQN} ALTER COLUMN created_at SET NOT NULL")
+            await conn.execute(f"ALTER TABLE {TABLE_FQN} ALTER COLUMN created_at SET DEFAULT NOW()")
+        except InsufficientPrivilegeError:
+            log.warning("No DDL privilege to set created_at default/NOT NULL.")
+        except PostgresError as exc:
+            log.debug("created_at ensure notice: %s: %s", type(exc).__name__, exc)
+
+        # Enforce NOT NULL on whichever time columns exist
+        try:
+            if has_until:
+                await conn.execute(f"ALTER TABLE {TABLE_FQN} ALTER COLUMN until SET NOT NULL")
+            if has_expires:
+                await conn.execute(f"ALTER TABLE {TABLE_FQN} ALTER COLUMN expires_at SET NOT NULL")
+        except InsufficientPrivilegeError:
+            log.warning("No DDL privilege to set NOT NULL on time column(s).")
+        except PostgresError as exc:
+            log.debug("Time column NOT NULL ensure notice: %s: %s", type(exc).__name__, exc)
+
+        # Unique index for ON CONFLICT
+        try:
+            await conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS user_timeouts_guild_user_uidx "
+                f"ON {TABLE_FQN} (guild_id, user_id)"
+            )
+        except InsufficientPrivilegeError:
+            log.warning("No DDL privilege to create unique index (guild_id,user_id).")
+        except PostgresError as exc:
+            log.debug("Unique index ensure notice: %s: %s", type(exc).__name__, exc)
 
 
 # ---------- Writes ----------
@@ -145,8 +139,7 @@ async def add_timeout(
 ) -> None:
     """
     Upsert a timeout for (guild_id, user_id).
-    If the schema/columns are missing and we cannot DDL, a clear RuntimeError is raised.
-    Supports tables that use 'until' or 'expires_at' for the time column.
+    Works whether the table uses 'until', 'expires_at', or both.
     """
     pool = get_pool()
     if pool is None:
@@ -156,56 +149,99 @@ async def add_timeout(
     await ensure_user_timeouts_schema()
 
     async with pool.acquire() as conn:
-        time_col = await _get_time_col(conn)
+        cols = await _detect_time_cols(conn)
+        has_until = cols["has_until"]
+        has_expires = cols["has_expires"]
+
+        if not (has_until or has_expires):
+            # Neither column exists and we couldn't add it (no DDL)
+            raise RuntimeError("USER_TIMEOUTS_TIME_COLUMN_MISSING")
+
+        # Build dynamic INSERT ... ON CONFLICT with whichever time columns exist
+        insert_cols = ["guild_id", "user_id"]
+        placeholders = ["$1", "$2"]
+        params = [int(guild_id), int(user_id)]
+        p = 3
+
+        # time columns: if both exist, write both to avoid NOT NULL violations
+        if has_until:
+            insert_cols.append("until")
+            placeholders.append(f"${p}")
+            params.append(until)
+            p += 1
+        if has_expires:
+            insert_cols.append("expires_at")
+            placeholders.append(f"${p}")
+            params.append(until)  # same value
+            p += 1
+
+        insert_cols += ["reason", "created_by", "created_at"]
+        placeholders += [f"${p}", f"${p+1}", "NOW()"]
+        params += [reason, created_by]
+
+        set_parts = []
+        if has_until:
+            set_parts.append("until = EXCLUDED.until")
+        if has_expires:
+            set_parts.append("expires_at = EXCLUDED.expires_at")
+        set_parts.append("reason = EXCLUDED.reason")
+        set_parts.append("created_by = EXCLUDED.created_by")
 
         UPSERT = f"""
-            INSERT INTO {TABLE_FQN} (guild_id, user_id, {time_col}, reason, created_by, created_at)
-            VALUES ($1, $2, $3, $4, $5, NOW())
+            INSERT INTO {TABLE_FQN} ({', '.join(insert_cols)})
+            VALUES ({', '.join(placeholders)})
             ON CONFLICT (guild_id, user_id) DO UPDATE
-            SET {time_col} = EXCLUDED.{time_col},
-                reason = EXCLUDED.reason,
-                created_by = EXCLUDED.created_by
+            SET {', '.join(set_parts)}
         """
+
         try:
-            await conn.execute(
-                UPSERT,
-                int(guild_id),
-                int(user_id),
-                until,
-                reason,
-                created_by,
-            )
+            await conn.execute(UPSERT, *params)
         except (UndefinedTableError, UndefinedColumnError):
             # Heal (if possible) then retry once
             await ensure_user_timeouts_schema()
-            time_col = await _get_time_col(conn)  # re-resolve in case it changed
+            cols = await _detect_time_cols(conn)
+            has_until = cols["has_until"]
+            has_expires = cols["has_expires"]
+            if not (has_until or has_expires):
+                raise RuntimeError("USER_TIMEOUTS_TABLE_MISSING")
+
+            # rebuild with current columns
+            insert_cols = ["guild_id", "user_id"]
+            placeholders = ["$1", "$2"]
+            params = [int(guild_id), int(user_id)]
+            p = 3
+            if has_until:
+                insert_cols.append("until")
+                placeholders.append(f"${p}")
+                params.append(until)
+                p += 1
+            if has_expires:
+                insert_cols.append("expires_at")
+                placeholders.append(f"${p}")
+                params.append(until)
+                p += 1
+            insert_cols += ["reason", "created_by", "created_at"]
+            placeholders += [f"${p}", f"${p+1}", "NOW()"]
+            params += [reason, created_by]
+
+            set_parts = []
+            if has_until:
+                set_parts.append("until = EXCLUDED.until")
+            if has_expires:
+                set_parts.append("expires_at = EXCLUDED.expires_at")
+            set_parts.append("reason = EXCLUDED.reason")
+            set_parts.append("created_by = EXCLUDED.created_by")
+
             UPSERT = f"""
-                INSERT INTO {TABLE_FQN} (guild_id, user_id, {time_col}, reason, created_by, created_at)
-                VALUES ($1, $2, $3, $4, $5, NOW())
+                INSERT INTO {TABLE_FQN} ({', '.join(insert_cols)})
+                VALUES ({', '.join(placeholders)})
                 ON CONFLICT (guild_id, user_id) DO UPDATE
-                SET {time_col} = EXCLUDED.{time_col},
-                    reason = EXCLUDED.reason,
-                    created_by = EXCLUDED.created_by
+                SET {', '.join(set_parts)}
             """
+
             try:
-                await conn.execute(
-                    UPSERT,
-                    int(guild_id),
-                    int(user_id),
-                    until,
-                    reason,
-                    created_by,
-                )
+                await conn.execute(UPSERT, *params)
             except (UndefinedTableError, UndefinedColumnError, InsufficientPrivilegeError):
-                # Check whether the critical time column exists in 'public'
-                exists = await conn.fetchval(
-                    """
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_schema='public' AND table_name='user_timeouts' AND column_name IN ('until','expires_at')
-                    """
-                )
-                if not exists:
-                    raise RuntimeError("USER_TIMEOUTS_TABLE_MISSING")
                 raise RuntimeError("MISSING_USER_TIMEOUTS_SCHEMA_OR_DDL_PRIVS")
         except InsufficientPrivilegeError as exc:
             raise RuntimeError("DB_WRITE_INSUFFICIENT_PRIVILEGE") from exc
@@ -213,30 +249,12 @@ async def add_timeout(
             raise RuntimeError(f"DB_WRITE_FAILED: {type(exc).__name__}") from exc
 
 
-async def clear_timeout(guild_id: int, user_id: int) -> None:
-    """Delete a timeout row if it exists."""
-    pool = get_pool()
-    if pool is None:
-        raise RuntimeError("DB pool is not initialized; check DATABASE_URL and pool init in main().")
-
-    async with pool.acquire() as conn:
-        try:
-            await conn.execute(
-                f"DELETE FROM {TABLE_FQN} WHERE guild_id=$1 AND user_id=$2",
-                int(guild_id),
-                int(user_id),
-            )
-        except (UndefinedTableError, UndefinedColumnError):
-            # Table/column missing => nothing to clear.
-            return
-
-
 # ---------- Reads ----------
 
 async def get_timeout_until(guild_id: int, user_id: int) -> Optional[datetime]:
     """
-    Return the 'until' timestamp if a timeout exists, else None.
-    Works whether the DB column is called 'until' or 'expires_at'.
+    Return the timeout timestamp if it exists, regardless of column name.
+    Uses COALESCE(until, expires_at) for compatibility.
     """
     pool = get_pool()
     if pool is None:
@@ -244,9 +262,8 @@ async def get_timeout_until(guild_id: int, user_id: int) -> Optional[datetime]:
 
     async with pool.acquire() as conn:
         try:
-            time_col = await _get_time_col(conn)
             row = await conn.fetchrow(
-                f"SELECT {time_col} AS until FROM {TABLE_FQN} WHERE guild_id=$1 AND user_id=$2",
+                f"SELECT COALESCE(until, expires_at) AS until FROM {TABLE_FQN} WHERE guild_id=$1 AND user_id=$2",
                 int(guild_id),
                 int(user_id),
             )
