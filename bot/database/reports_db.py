@@ -1,14 +1,31 @@
 from __future__ import annotations
 
-from ..db import get_pool
+import asyncio
+from typing import Any, Optional
 
-# ---------------------- Reports Table ----------------------
+from ..db import get_pool  # your existing pool getter (might be sync or async)
 
-async def create_reports_table() -> None:
-    """Create/upgrade the reports table (idempotent)."""
+# ---------- internal: robustly obtain the pool (handles sync/async get_pool) ----------
+
+async def _get_pool():
+    """
+    Returns an initialized asyncpg pool.
+
+    Works whether your get_pool() is synchronous or asynchronous.
+    Raises RuntimeError if the pool is still not initialized.
+    """
     pool = get_pool()
+    if asyncio.iscoroutine(pool):
+        pool = await pool
     if pool is None:
         raise RuntimeError("DB pool is not initialized.")
+    return pool
+
+# -------------------------------- Reports Table --------------------------------
+
+async def create_reports_table() -> None:
+    """Create/upgrade the reports & conversations tables (idempotent)."""
+    pool = await _get_pool()
     async with pool.acquire() as conn:
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS reports (
@@ -26,12 +43,10 @@ async def create_reports_table() -> None:
             reported_count_at_creation INT
         )
         """)
-        # Helpful index for history lookups
         await conn.execute(
             "CREATE INDEX IF NOT EXISTS reports_reported_created_idx "
             "ON reports (reported_id, created_at DESC)"
         )
-        # Conversation bridge table
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS report_conversations (
             report_id    INT PRIMARY KEY REFERENCES reports(id) ON DELETE CASCADE,
@@ -57,16 +72,13 @@ async def insert_report(
     Insert a report and return (report_id, total_reports_for_user_including_this_one).
     Also snapshots the total at creation into reported_count_at_creation.
     """
-    pool = get_pool()
-    if pool is None:
-        raise RuntimeError("DB pool is not initialized.")
+    pool = await _get_pool()
     async with pool.acquire() as conn:
-        # Count existing reports against this user
         count_before = await conn.fetchval(
             "SELECT COUNT(*) FROM reports WHERE reported_id = $1",
             int(reported_id),
         )
-        total_reports = int(count_before) + 1
+        total_reports = int(count_before or 0) + 1
 
         row = await conn.fetchrow(
             """
@@ -89,9 +101,7 @@ async def insert_report(
 
 async def close_report(report_id: int, closed_by: int) -> None:
     """Mark a report closed; no-op if id missing."""
-    pool = get_pool()
-    if pool is None:
-        raise RuntimeError("DB pool is not initialized.")
+    pool = await _get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE reports SET status='closed', closed_by=$2, closed_at=NOW() WHERE id=$1",
@@ -100,9 +110,7 @@ async def close_report(report_id: int, closed_by: int) -> None:
 
 async def get_report_count_for_user(reported_id: int) -> int:
     """Return the current total number of reports against a user."""
-    pool = get_pool()
-    if pool is None:
-        raise RuntimeError("DB pool is not initialized.")
+    pool = await _get_pool()
     async with pool.acquire() as conn:
         val = await conn.fetchval(
             "SELECT COUNT(*) FROM reports WHERE reported_id = $1",
@@ -112,9 +120,7 @@ async def get_report_count_for_user(reported_id: int) -> int:
 
 async def fetch_recent_reports_by_reported(reported_id: int, limit: int = 10):
     """Return recent reports for a user (most recent first)."""
-    pool = get_pool()
-    if pool is None:
-        raise RuntimeError("DB pool is not initialized.")
+    pool = await _get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
@@ -129,12 +135,10 @@ async def fetch_recent_reports_by_reported(reported_id: int, limit: int = 10):
         )
         return rows
 
-# ------------------ DM conversation bridge --------------------
+# ------------------------------ DM conversation bridge ------------------------------
 
 async def open_conversation(report_id: int, reporter_id: int, channel_id: int) -> None:
-    pool = get_pool()
-    if pool is None:
-        raise RuntimeError("DB pool is not initialized.")
+    pool = await _get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             """
@@ -142,16 +146,14 @@ async def open_conversation(report_id: int, reporter_id: int, channel_id: int) -
             VALUES ($1, $2, $3, TRUE)
             ON CONFLICT (report_id)
             DO UPDATE SET reporter_id = EXCLUDED.reporter_id,
-                          channel_id = EXCLUDED.channel_id,
-                          is_open    = TRUE;
+                          channel_id  = EXCLUDED.channel_id,
+                          is_open     = TRUE;
             """,
             int(report_id), int(reporter_id), int(channel_id)
         )
 
-async def get_open_conversation_by_reporter(reporter_id: int):
-    pool = get_pool()
-    if pool is None:
-        raise RuntimeError("DB pool is not initialized.")
+async def get_open_conversation_by_reporter(reporter_id: int) -> Optional[dict[str, Any]]:
+    pool = await _get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
@@ -166,9 +168,7 @@ async def get_open_conversation_by_reporter(reporter_id: int):
         return dict(row) if row else None
 
 async def close_conversation(report_id: int) -> None:
-    pool = get_pool()
-    if pool is None:
-        raise RuntimeError("DB pool is not initialized.")
+    pool = await _get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE report_conversations SET is_open = FALSE WHERE report_id = $1;",
