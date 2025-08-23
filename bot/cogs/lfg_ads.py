@@ -259,6 +259,7 @@ class ConnectButton(ui.View):
     @ui.button(label="Report", style=discord.ButtonStyle.danger, custom_id="lfg:report")
     async def report(self, interaction: discord.Interaction, button: ui.Button):
         """Open a modal to report this ad; routes to main bot guild Reports category."""
+        acked = await safe_ack(interaction, ephemeral=True, use_thinking=False)  # ✅ SAFE DEFER
         try:
             pool = get_pool()
             if pool is None:
@@ -266,10 +267,11 @@ class ConnectButton(ui.View):
 
             ad_id = self.ad_id or _extract_ad_id_from_message(interaction.message)
             if not ad_id:
-                if not interaction.response.is_done():
-                    await interaction.response.send_message("This ad can’t be identified anymore.", ephemeral=True)
+                msg = "This ad can’t be identified anymore."
+                if acked:
+                    await interaction.followup.send(msg, ephemeral=True)
                 else:
-                    await interaction.followup.send("This ad can’t be identified anymore.", ephemeral=True)
+                    await interaction.response.send_message(msg, ephemeral=True)
                 return
 
             async with pool.acquire() as conn:
@@ -278,27 +280,39 @@ class ConnectButton(ui.View):
                     int(ad_id),
                 )
             if not ad_row:
-                if not interaction.response.is_done():
-                    await interaction.response.send_message("This ad no longer exists.", ephemeral=True)
+                msg = "This ad no longer exists."
+                if acked:
+                    await interaction.followup.send(msg, ephemeral=True)
                 else:
-                    await interaction.followup.send("This ad no longer exists.", ephemeral=True)
+                    await interaction.response.send_message(msg, ephemeral=True)
                 return
 
             reported_id = int(ad_row["author_id"])
 
+            # ✅ Try to obtain (or lazy-load) the Reports cog so the modal is always available
             reports_cog = interaction.client.get_cog("Reports")
+            if not reports_cog:
+                try:
+                    await interaction.client.load_extension("bot.cogs.reports")
+                except commands.ExtensionAlreadyLoaded:
+                    pass
+                except Exception:
+                    LOGGER.exception("Failed to lazy-load reports cog")
+                reports_cog = interaction.client.get_cog("Reports")
+
             if not reports_cog or not hasattr(reports_cog, "open_report_modal"):
-                if not interaction.response.is_done():
-                    await interaction.response.send_message("Reporting isn’t available right now. Try again later.", ephemeral=True)
+                msg = "Reporting isn’t available right now. Try again later."
+                if acked:
+                    await interaction.followup.send(msg, ephemeral=True)
                 else:
-                    await interaction.followup.send("Reporting isn’t available right now. Try again later.", ephemeral=True)
+                    await interaction.response.send_message(msg, ephemeral=True)
                 return
 
             await reports_cog.open_report_modal(interaction, reported_id=reported_id, ad_id=int(ad_id))
 
         except Exception:
             LOGGER.exception("Failed to open report modal")
-            if interaction.response.is_done():
+            if acked:
                 await interaction.followup.send("Something went wrong while opening the report form.", ephemeral=True)
             else:
                 await interaction.response.send_message("Something went wrong while opening the report form.", ephemeral=True)
