@@ -280,18 +280,8 @@ class ConnectButton(ui.View):
 
             reported_id = int(ad_row["author_id"])
 
-            # Ensure Reports cog is available BEFORE sending the modal
+            # Reports cog should be loaded by main.py at startup
             reports_cog = interaction.client.get_cog("Reports")
-            if not reports_cog:
-                try:
-                    await interaction.client.load_extension("bot.cogs.reports")
-                    LOGGER.info("Lazy-loaded bot.cogs.reports for Report button.")
-                except commands.ExtensionAlreadyLoaded:
-                    pass
-                except Exception:
-                    LOGGER.exception("Failed to lazy-load reports cog")
-                reports_cog = interaction.client.get_cog("Reports")
-
             if not reports_cog or not hasattr(reports_cog, "open_report_modal"):
                 await interaction.response.send_message("Reporting isn’t available right now. Try again later.", ephemeral=True)
                 return
@@ -318,17 +308,7 @@ class LfgAds(commands.Cog):
         # Register persistent view for old messages
         self.bot.add_view(ConnectButton(ad_id=None, timeout=None))
 
-        # ✅ Ensure the Reports cog is loaded at startup so its persistent views work after restart
-        try:
-            if not self.bot.get_cog("Reports"):
-                await self.bot.load_extension("bot.cogs.reports")
-                LOGGER.info("Auto-loaded bot.cogs.reports on startup so persistent report buttons are live.")
-        except commands.ExtensionAlreadyLoaded:
-            pass
-        except Exception:
-            LOGGER.exception("Failed to auto-load bot.cogs.reports")
-
-        # Make sure cooldowns table exists (no-op if already there)
+        # Ensure cooldowns table exists (no-op if already there)
         try:
             await cooldowns_db.ensure_cooldowns_schema()
         except Exception:
