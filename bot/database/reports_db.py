@@ -27,6 +27,11 @@ async def create_reports_table() -> None:
           ADD COLUMN IF NOT EXISTS closed_at TIMESTAMPTZ,
           ADD COLUMN IF NOT EXISTS reported_count_at_creation INT
         """)
+        # Helpful index for history lookups
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS reports_reported_created_idx "
+            "ON reports (reported_id, created_at DESC)"
+        )
 
 async def insert_report(
     *,
@@ -93,3 +98,22 @@ async def get_report_count_for_user(reported_id: int) -> int:
             int(reported_id),
         )
         return int(val or 0)
+
+async def fetch_recent_reports_by_reported(reported_id: int, limit: int = 10):
+    """Return recent reports for a user (most recent first)."""
+    pool = get_pool()
+    if pool is None:
+        raise RuntimeError("DB pool is not initialized.")
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, origin_guild_id, reporter_id, reported_id, ad_id, ad_message_id,
+                   description, status, created_at, closed_at, closed_by
+            FROM reports
+            WHERE reported_id = $1
+            ORDER BY created_at DESC
+            LIMIT $2
+            """,
+            int(reported_id), int(limit),
+        )
+        return rows

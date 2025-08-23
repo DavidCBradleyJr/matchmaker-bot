@@ -13,7 +13,6 @@ async def ensure_cooldowns_schema() -> None:
     if not pool:
         raise RuntimeError("DB pool not initialized")
     async with pool.acquire() as conn:
-        # Create table (DDL best-effort)
         try:
             await conn.execute(f"""
                 CREATE TABLE IF NOT EXISTS {TABLE_FQN} (
