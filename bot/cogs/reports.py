@@ -100,6 +100,8 @@ class AskReporterModal(ui.Modal, title="Ask Reporter for More Info"):
                     await reports_db.open_conversation(
                         int(self.report_id), int(self.target.id), int(self.channel_id)
                     )
+                    LOGGER.info("DM relay opened: report=%s reporter=%s -> channel=%s",
+                                self.report_id, self.target.id, self.channel_id)
             except Exception:
                 LOGGER.exception("Failed to open report DM conversation bridge")
             await interaction.response.send_message("✅ DM sent to reporter.", ephemeral=True)
@@ -190,7 +192,6 @@ class TimeoutModal(ui.Modal, title="Timeout Reported User"):
             else:
                 await interaction.followup.send(base, ephemeral=True)
 
-# NEW: This was missing and caused the NameError
 class AdReportModal(ui.Modal, title="Report this ad"):
     """
     Collects the reporter's description and files a new report channel
@@ -217,7 +218,6 @@ class AdReportModal(ui.Modal, title="Report this ad"):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         desc = str(self.description.value).strip()
 
-        # Env guards (mirror staging behavior)
         if not MAIN_BOT_GUILD_ID or not REPORTS_CATEGORY_ID:
             await interaction.response.send_message(
                 "Reporting isn’t configured yet. (Missing MAIN_BOT_GUILD_ID / REPORTS_CATEGORY_ID)",
@@ -293,6 +293,8 @@ class AdReportModal(ui.Modal, title="Report this ad"):
             # Open the DM bridge immediately so replies route back
             try:
                 await reports_db.open_conversation(int(report_id), int(reporter_user.id), int(channel.id))
+                LOGGER.info("DM relay opened (post-create): report=%s reporter=%s -> channel=%s",
+                            report_id, reporter_user.id, channel.id)
             except Exception:
                 LOGGER.exception("Failed to open conversation after report creation")
 
@@ -459,6 +461,7 @@ class Reports(commands.Cog):
         self.bot.add_view(ReportModerationView(
             report_id=None, reporter_id=None, reported_id=None, ad_id=None, origin_guild_id=None, ad_jump=None
         ))
+        LOGGER.info("Reports cog loaded; DM relay listener active.")
 
     async def open_report_modal(self, interaction: discord.Interaction, *, reported_id: int, ad_id: int) -> None:
         # IMPORTANT: Do NOT defer before calling this; first response must be the modal.
@@ -481,6 +484,51 @@ class Reports(commands.Cog):
             origin_guild_id=origin_guild_id,
         )
         await interaction.response.send_modal(modal)
+
+    # ---------- DM → Report channel relay ----------
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        """
+        Relay reporter DM replies back into the report channel.
+        Requires Message Content Intent to be enabled for DMs.
+        """
+        # Only DMs from humans
+        if message.author.bot or message.guild is not None:
+            return
+        try:
+            link = await reports_db.get_open_conversation_by_reporter(message.author.id)
+            if not link:
+                return  # no open conversation for this reporter
+
+            # Fetch the report channel
+            channel = self.bot.get_channel(int(link["channel_id"]))
+            if channel is None:
+                try:
+                    channel = await self.bot.fetch_channel(int(link["channel_id"]))
+                except Exception:
+                    LOGGER.exception("Cannot fetch report channel %s for DM relay", link["channel_id"])
+                    return
+            if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+                LOGGER.info("Relay target is not a text channel/thread: %s", type(channel))
+                return
+
+            header = f"**Reply from <@{message.author.id}> on report `#{link['report_id']}`:**"
+            parts = [header]
+            if message.content:
+                parts.append(message.content)
+
+            files = []
+            for a in message.attachments:
+                try:
+                    files.append(await a.to_file())
+                except Exception:
+                    LOGGER.exception("Failed to pull DM attachment for relay")
+
+            await channel.send("\n".join(parts), files=files or None)
+            LOGGER.info("DM relayed to channel=%s for report=%s by user=%s",
+                        link["channel_id"], link["report_id"], message.author.id)
+        except Exception:
+            LOGGER.exception("Failed to relay DM reply from %s", message.author.id)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Reports(bot), override=True)
