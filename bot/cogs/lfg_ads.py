@@ -5,8 +5,7 @@ import logging
 import os
 import re
 import traceback
-from datetime import datetime, timezone
-from time import monotonic
+from datetime import datetime, timezone, timedelta
 
 import discord
 from discord import app_commands, ui
@@ -15,7 +14,7 @@ from discord.ext import commands
 from ..db import get_pool
 import bot.db as db
 from ..ui.dm_styles import send_pretty_interest_dm
-from ..database import moderation_db
+from ..database import moderation_db, cooldowns_db
 
 # ---------------------
 # Logging
@@ -34,7 +33,7 @@ LOGGER.setLevel(logging.INFO)
 # ---------------------
 
 POST_TIMEOUT_SECONDS = int(os.getenv("LFG_POST_TIMEOUT_SECONDS", "60"))
-USER_COOLDOWN_SEC = 5 * 60  # 1 post per user per 5 minutes
+USER_COOLDOWN_SEC = 5 * 60  # GLOBAL cooldown across servers
 MAX_SEND_CONCURRENCY = int(os.getenv("LFG_POST_MAX_CONCURRENCY", "5"))
 PER_SEND_TIMEOUT = int(os.getenv("LFG_POST_PER_SEND_TIMEOUT", "8"))
 SURFACE_ERROR_CODE = os.getenv("LFG_SURFACE_ERROR_CODE", "1") == "1"
@@ -81,12 +80,7 @@ def _err_code(prefix: str, exc: BaseException | None = None) -> str:
     return f" ({prefix}:{typ})" if typ else f" ({prefix})"
 
 
-def _format_missing(perms: list[str]) -> str:
-    return ", ".join(f"`{p}`" for p in perms)
-
-
 def _check_channel_perms(guild: discord.Guild, channel: discord.abc.GuildChannel) -> list[str]:
-    """Return a list of missing perms the bot needs in this channel."""
     me = guild.me
     if me is None:
         return ["bot member not resolved"]
@@ -102,7 +96,6 @@ def _check_channel_perms(guild: discord.Guild, channel: discord.abc.GuildChannel
 
 
 def _rel(ts: datetime | None) -> str:
-    """Discord relative timestamp like 'in 5 minutes'."""
     if not ts:
         return ""
     try:
@@ -140,8 +133,8 @@ class ConnectButton(ui.View):
     """
     Persistent actions for an LFG ad.
     - timeout=None => persistent across restarts
-    - custom_ids are stable ('lfg:connect', 'lfg:report') so a single instance
-      registered on boot can handle ALL historical messages.
+    - custom_ids are stable ('lfg:connect', 'lfg:report') so one instance on boot
+      can handle ALL historical messages.
     - ad_id is resolved from the embed if not present (post-restart case).
     """
     def __init__(self, ad_id: int | None = None, *, timeout: float | None = None):
@@ -317,13 +310,15 @@ class ConnectButton(ui.View):
 class LfgAds(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        # Per-(guild,user) cooldowns: key=(guild_id, user_id) -> monotonic deadline
-        self._post_cooldowns: dict[tuple[int, int], float] = {}
 
     async def cog_load(self) -> None:
-        # Register a persistent handler for all existing messages that have our stable custom_ids.
-        # New posts also use this same class; if self.ad_id is missing (post-restart), we parse it from the embed.
+        # Register persistent view for old messages
         self.bot.add_view(ConnectButton(ad_id=None, timeout=None))
+        # Make sure cooldowns table exists (no-op if already there)
+        try:
+            await cooldowns_db.ensure_cooldowns_schema()
+        except Exception:
+            LOGGER.exception("Failed to ensure cooldowns table")
 
     lfg = app_commands.Group(name="lfg_ad", description="Create and manage LFG ads")
 
@@ -355,14 +350,18 @@ class LfgAds(commands.Cog):
         except Exception:
             LOGGER.exception("Timeout check failed in /lfg_ad post; allowing command to proceed")
 
-        # ---- Custom cooldown (per guild+user) AFTER timeout gate ----
-        key = (interaction.guild.id, interaction.user.id)
-        now_mono = monotonic()
-        next_ok = self._post_cooldowns.get(key)
-        if next_ok and now_mono < next_ok:
-            retry = int(next_ok - now_mono)
-            await interaction.response.send_message(f"⏳ Slow down! You can post again in **{retry}s**.", ephemeral=True)
-            return
+        # ---- GLOBAL cooldown (DB) AFTER timeout gate ----
+        now = datetime.now(timezone.utc)
+        try:
+            next_ok = await cooldowns_db.get_next_ok_at(interaction.user.id)
+            if next_ok and next_ok > now:
+                await interaction.response.send_message(
+                    f"⏳ Global cooldown active. You can post again <t:{int(next_ok.timestamp())}:R>.",
+                    ephemeral=True,
+                )
+                return
+        except Exception:
+            LOGGER.exception("Cooldown read failed; allowing to proceed")
 
         acked = await safe_ack(interaction, message="Posting your ad…", ephemeral=True, use_thinking=False)
         if not acked:
@@ -441,7 +440,6 @@ class LfgAds(commands.Cog):
                 if not isinstance(channel, discord.TextChannel):
                     return False
 
-                # permissions check per target
                 missing = _check_channel_perms(guild, channel)
                 if missing:
                     LOGGER.info("Skip %s#%s (missing perms: %s)", guild_id, channel_id, missing)
@@ -505,14 +503,20 @@ class LfgAds(commands.Cog):
                     )
                 )
                 await db.stats_inc("ads_posted", 1)
-                # Start cooldown ONLY on success
-                key = (interaction.guild.id, interaction.user.id)
-                self._post_cooldowns[key] = monotonic() + USER_COOLDOWN_SEC
+                # Set GLOBAL cooldown in DB
+                try:
+                    now2 = datetime.now(timezone.utc)
+                    await cooldowns_db.set_next_ok_at(
+                        interaction.user.id,
+                        now2 + timedelta(seconds=USER_COOLDOWN_SEC),
+                        reason="lfg_post",
+                    )
+                except Exception:
+                    LOGGER.exception("Cooldown write failed")
         except (discord.NotFound, discord.HTTPException):
             pass
 
     async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-        # With custom cooldowns we shouldn't hit this, but keep the handler for resilience.
         LOGGER.exception("Unhandled error in LFG ads command", exc_info=error)
         if interaction.response.is_done():
             await interaction.followup.send(
