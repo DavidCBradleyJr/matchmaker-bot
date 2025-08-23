@@ -249,6 +249,7 @@ class LfgAds(commands.Cog):
             if pool is None:
                 raise RuntimeError("DB pool is not initialized; check DATABASE_URL and pool init in main().")
 
+            # 1) Insert the ad in the DB (author+content)
             try:
                 async with pool.acquire() as conn:
                     ad_id = await conn.fetchval(
@@ -268,6 +269,7 @@ class LfgAds(commands.Cog):
                 LOGGER.error("DB insert failed:\n%s", traceback.format_exc())
                 raise RuntimeError("DB_INSERT") from exc
 
+            # 2) Build the embed/view
             try:
                 title_bits: list[str] = [game]
                 if platform:
@@ -288,48 +290,62 @@ class LfgAds(commands.Cog):
                     text=f"Posted by {interaction.user} • Ad #{ad_id} • Powered by Matchmaker",
                     icon_url="https://i.imgur.com/4x9pIr0.png"
                 )
-
-                async with pool.acquire() as conn:
-                    rows = await conn.fetch(
-                        "SELECT guild_id, lfg_channel_id FROM guild_settings WHERE lfg_channel_id IS NOT NULL"
-                    )
             except Exception as exc:
-                LOGGER.error("Building embed or guild settings query failed:\n%s", traceback.format_exc())
-                raise RuntimeError("GUILD_QUERY") from exc
+                LOGGER.error("Building embed failed:\n%s", traceback.format_exc())
+                raise RuntimeError("EMBED_BUILD") from exc
 
-            view = ConnectButton(ad_id=ad_id)
-            sem = asyncio.Semaphore(MAX_SEND_CONCURRENCY)
-            posted_count = 0
+            # 3) Resolve the target LFG channel for THIS guild (hydrated from DB after redeploy)
+            try:
+                gs = self.bot.get_cog("GuildSettings")
+                channel: discord.TextChannel | None = None
+                if gs and hasattr(gs, "resolve_lfg_channel"):
+                    # Preferred path: uses cache hydrated on_ready + DB fallback
+                    channel = await gs.resolve_lfg_channel(interaction.guild)
+                else:
+                    # Fallback: read from DB directly if cog isn't available yet
+                    async with pool.acquire() as conn:
+                        cid = await conn.fetchval(
+                            "SELECT lfg_channel_id FROM guild_settings WHERE guild_id=$1",
+                            interaction.guild.id
+                        )
+                    if cid:
+                        channel = interaction.guild.get_channel(int(cid)) or await interaction.guild.fetch_channel(int(cid))
 
-            async def send_one(guild_id: int, channel_id: int) -> bool:
-                guild = self.bot.get_guild(guild_id)
-                if not guild:
-                    return False
-                channel = guild.get_channel(channel_id)
                 if not isinstance(channel, discord.TextChannel):
-                    return False
-                async with sem:
-                    try:
-                        await asyncio.wait_for(channel.send(embed=embed, view=view), timeout=PER_SEND_TIMEOUT)
-                        return True
-                    except (discord.Forbidden, discord.HTTPException, asyncio.TimeoutError) as exc:
-                        LOGGER.info("Send to %s#%s failed: %r", guild.name if guild else guild_id, channel_id, exc)
-                        return False
+                    raise RuntimeError("NO_LFG_CHANNEL_SET")
 
-            tasks = [
-                asyncio.create_task(send_one(int(r["guild_id"]), int(r["lfg_channel_id"])))
-                for r in rows
-            ]
+                # 4) Post in the resolved channel
+                await asyncio.wait_for(channel.send(embed=embed, view=ConnectButton(ad_id=ad_id)), timeout=PER_SEND_TIMEOUT)
+                return 1
 
-            for coro in asyncio.as_completed(tasks):
-                ok = await coro
-                if ok:
-                    posted_count += 1
-
-            return posted_count
+            except Exception as exc:
+                if isinstance(exc, RuntimeError) and str(exc) == "NO_LFG_CHANNEL_SET":
+                    # Clear message for user; handled by caller
+                    raise
+                LOGGER.error("Posting to guild channel failed:\n%s", traceback.format_exc())
+                raise RuntimeError("POST_SEND") from exc
 
         try:
             posted = await asyncio.wait_for(do_post_work(), timeout=POST_TIMEOUT_SECONDS)
+        except RuntimeError as exc:
+            if str(exc) == "NO_LFG_CHANNEL_SET":
+                try:
+                    await interaction.edit_original_response(
+                        content=(
+                            "Your ad was saved, but this server doesn’t have an LFG channel configured.\n"
+                            "Ask an admin to run `/lfg_channel set #channel`."
+                        )
+                    )
+                except Exception:
+                    pass
+                return
+            try:
+                await interaction.edit_original_response(
+                    content="Something went wrong while posting your ad. Please try again." + _err_code("POST", exc)
+                )
+            except Exception:
+                pass
+            return
         except asyncio.TimeoutError:
             LOGGER.warning("post() timed out after %ss", POST_TIMEOUT_SECONDS)
             try:
@@ -358,10 +374,7 @@ class LfgAds(commands.Cog):
                 )
             else:
                 await interaction.edit_original_response(
-                    content=(
-                        "✅ Your ad was posted!"
-                        f"\n• **Servers posted to:** {posted}"
-                    )
+                    content="✅ Your ad was posted in this server’s LFG channel."
                 )
                 await db.stats_inc("ads_posted", 1)
         except (discord.NotFound, discord.HTTPException):
