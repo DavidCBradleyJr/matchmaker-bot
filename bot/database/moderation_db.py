@@ -45,8 +45,7 @@ async def ensure_user_timeouts_schema() -> None:
                 """
             )
         except InsufficientPrivilegeError:
-            log.warning("No DDL privilege to CREATE user_timeouts; relying on existing schema.")
-            return
+            log.warning("No DDL privilege to CREATE user_timeouts; will still attempt ALTER checks.")
 
         # Try to add columns if missing (best-effort)
         for stmt in (

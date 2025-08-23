@@ -24,6 +24,9 @@ REPORTS_CATEGORY_ID = int(os.getenv("REPORTS_CATEGORY_ID", "0"))
 OWNER_USER_ID = int(os.getenv("OWNER_USER_ID", "0"))
 MAX_DESC = 120
 
+REPORT_ID_RE = re.compile(r"Ad\s*Report\s*#\s*(\d+)", re.IGNORECASE)
+BACKTICK_NUM_RE = re.compile(r"\(`?(\d+)`?\)")
+
 def _slug_name(name: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower())
     return slug.strip("-")[:24] or "user"
@@ -33,6 +36,41 @@ def _is_mod(member: discord.Member) -> bool:
         return True
     p = member.guild_permissions
     return bool(p.manage_guild or p.manage_channels or p.administrator)
+
+def _parse_ctx_from_message(msg: discord.Message | None) -> dict[str, int | None]:
+    """
+    Try to recover report context from the message/channel so buttons work after restarts.
+    Returns keys: report_id, reported_id, ad_id, origin_guild_id (values or None).
+    """
+    report_id = reported_id = ad_id = origin_guild_id = None
+    if not msg:
+        return {"report_id": None, "reported_id": None, "ad_id": None, "origin_guild_id": None}
+    try:
+        if isinstance(msg.channel, discord.TextChannel):
+            m = re.search(r"report-(\d+)-", msg.channel.name)
+            if m:
+                report_id = int(m.group(1))
+            if msg.channel.topic:
+                mg = re.search(r"From guild\s+(\d+)", msg.channel.topic, re.IGNORECASE)
+                if mg:
+                    origin_guild_id = int(mg.group(1))
+        for emb in msg.embeds or ():
+            if emb.title:
+                m = REPORT_ID_RE.search(emb.title)
+                if m:
+                    report_id = report_id or int(m.group(1))
+            for f in emb.fields:
+                if f.name and f.name.lower() == "ad":
+                    m = re.search(r"`(\d+)`", str(f.value))
+                    if m:
+                        ad_id = int(m.group(1))
+                if f.name and f.name.lower() == "reported":
+                    m = BACKTICK_NUM_RE.search(str(f.value))
+                    if m:
+                        reported_id = int(m.group(1))
+        return {"report_id": report_id, "reported_id": reported_id, "ad_id": ad_id, "origin_guild_id": origin_guild_id}
+    except Exception:
+        return {"report_id": report_id, "reported_id": reported_id, "ad_id": ad_id, "origin_guild_id": origin_guild_id}
 
 class AskReporterModal(ui.Modal, title="Ask Reporter for More Info"):
     def __init__(self, target: discord.User):
@@ -139,7 +177,8 @@ class TimeoutModal(ui.Modal, title="Timeout Reported User"):
                 await interaction.followup.send(base + diag, ephemeral=True)
 
 class ReportModerationView(ui.View):
-    def __init__(self, *, report_id: int, reporter_id: int, reported_id: int, ad_id: int, origin_guild_id: int, ad_jump: str | None):
+    def __init__(self, *, report_id: int | None, reporter_id: int | None, reported_id: int | None,
+                 ad_id: int | None, origin_guild_id: int | None, ad_jump: str | None):
         super().__init__(timeout=None)
         self.report_id = report_id
         self.reporter_id = reporter_id
@@ -156,15 +195,22 @@ class ReportModerationView(ui.View):
 
     @ui.button(label="Ask Reporter", style=discord.ButtonStyle.secondary, custom_id="report:ask_reporter")
     async def ask_reporter(self, interaction: discord.Interaction, button: ui.Button):
-        user = interaction.client.get_user(self.reporter_id) or await interaction.client.fetch_user(self.reporter_id)
-        if not user:
-            await interaction.response.send_message("Reporter not found.", ephemeral=True)
+        ctx = _parse_ctx_from_message(interaction.message)
+        reporter_user = interaction.client.get_user(self.reporter_id or 0) if self.reporter_id else None
+        if not reporter_user:
+            # we don't currently show reporter id in embed; just inform
+            await interaction.response.send_message("Reporter not cached; try again later.", ephemeral=True)
             return
-        await interaction.response.send_modal(AskReporterModal(user))
+        await interaction.response.send_modal(AskReporterModal(reporter_user))
 
     @ui.button(label="Warn Reported", style=discord.ButtonStyle.primary, custom_id="report:warn_reported")
     async def warn_reported(self, interaction: discord.Interaction, button: ui.Button):
-        user = interaction.client.get_user(self.reported_id) or await interaction.client.fetch_user(self.reported_id)
+        ctx = _parse_ctx_from_message(interaction.message)
+        target_id = ctx["reported_id"] or self.reported_id
+        if not target_id:
+            await interaction.response.send_message("Can’t identify the reported user on this message.", ephemeral=True)
+            return
+        user = interaction.client.get_user(int(target_id)) or await interaction.client.fetch_user(int(target_id))
         if not user:
             await interaction.response.send_message("User not found.", ephemeral=True)
             return
@@ -172,12 +218,20 @@ class ReportModerationView(ui.View):
 
     @ui.button(label="Timeout Reported", style=discord.ButtonStyle.danger, custom_id="report:timeout")
     async def timeout_reported(self, interaction: discord.Interaction, button: ui.Button):
-        await interaction.response.send_modal(TimeoutModal(self.reported_id))
+        ctx = _parse_ctx_from_message(interaction.message)
+        target_id = ctx["reported_id"] or self.reported_id
+        if not target_id:
+            await interaction.response.send_message("Can’t identify the reported user on this message.", ephemeral=True)
+            return
+        await interaction.response.send_modal(TimeoutModal(int(target_id)))
 
     @ui.button(label="Resolve / Close", style=discord.ButtonStyle.success, custom_id="report:resolve")
     async def resolve_close(self, interaction: discord.Interaction, button: ui.Button):
+        ctx = _parse_ctx_from_message(interaction.message)
+        rid = ctx["report_id"] or self.report_id
         try:
-            await reports_db.close_report(self.report_id, closed_by=interaction.user.id)
+            if rid:
+                await reports_db.close_report(int(rid), closed_by=interaction.user.id)
         except Exception:
             LOGGER.exception("Failed to mark report closed in DB")
 
@@ -186,12 +240,17 @@ class ReportModerationView(ui.View):
             if isinstance(channel, discord.TextChannel):
                 name = channel.name
                 if not name.startswith("resolved-"):
-                    await channel.edit(name=f"resolved-{name}", reason=f"Report #{self.report_id} resolved")
+                    await channel.edit(name=f"resolved-{name}", reason=f"Report #{rid or '?'} resolved")
                 ow = channel.overwrites
                 ow[channel.guild.default_role] = discord.PermissionOverwrite(send_messages=False)
-                await channel.edit(overwrites=ow, reason=f"Report #{self.report_id} closed")
+                await channel.edit(overwrites=ow, reason=f"Report #{rid or '?'} closed")
+            # respond to clicker
             await interaction.response.send_message("✅ Report closed and channel locked.", ephemeral=True)
-            await channel.send(f"🟢 **Resolved by** {interaction.user.mention} — report #{self.report_id}.")
+            # notify the room (best-effort)
+            try:
+                await channel.send(f"🟢 **Resolved by** {interaction.user.mention} — report #{rid or '?'}")
+            except Exception:
+                pass
         except Exception:
             LOGGER.exception("Failed to lock/rename channel on resolve")
             if not interaction.response.is_done():
@@ -307,6 +366,10 @@ class Reports(commands.Cog):
     async def cog_load(self) -> None:
         await reports_db.create_reports_table()
         await moderation_db.ensure_user_timeouts_schema()
+        # Register a persistent stateless handler so buttons on old messages work after restarts.
+        self.bot.add_view(ReportModerationView(
+            report_id=None, reporter_id=None, reported_id=None, ad_id=None, origin_guild_id=None, ad_jump=None
+        ))
 
     async def open_report_modal(self, interaction: discord.Interaction, *, reported_id: int, ad_id: int) -> None:
         if not MAIN_BOT_GUILD_ID or not REPORTS_CATEGORY_ID:
