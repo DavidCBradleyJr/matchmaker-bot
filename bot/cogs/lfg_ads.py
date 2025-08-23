@@ -11,8 +11,7 @@ from discord.ext import commands
 
 from ..db import get_pool
 import bot.db as db
-
-from ..ui.dm_styles import send_pretty_interest_dm  # import the helper
+from ..ui.dm_styles import send_pretty_interest_dm
 
 # ---------------------
 # Logging
@@ -325,89 +324,56 @@ class LfgAds(commands.Cog):
                 LOGGER.error("Building embed failed:\n%s", traceback.format_exc())
                 raise RuntimeError("EMBED_BUILD") from exc
 
-            # 3) Resolve the target LFG channel for THIS guild (hydrated from DB after redeploy)
+            # 3) BROADCAST: fetch every guild's configured LFG channel and post concurrently
             try:
-                gs = self.bot.get_cog("GuildSettings")
-                channel: discord.TextChannel | None = None
-                if gs and hasattr(gs, "resolve_lfg_channel"):
-                    # Preferred path: uses cache hydrated on_ready + DB fallback
-                    channel = await gs.resolve_lfg_channel(interaction.guild)
-                else:
-                    # Fallback: read from DB directly if cog isn't available yet
-                    async with pool.acquire() as conn:
-                        cid = await conn.fetchval(
-                            "SELECT lfg_channel_id FROM guild_settings WHERE guild_id=$1",
-                            interaction.guild.id
-                        )
-                    if cid:
-                        channel = interaction.guild.get_channel(int(cid)) or await interaction.guild.fetch_channel(int(cid))
-
-                if not isinstance(channel, discord.TextChannel):
-                    raise RuntimeError("NO_LFG_CHANNEL_SET")
-
-                # 4) Permissions check BEFORE trying to send
-                missing = _check_channel_perms(interaction.guild, channel)
-                if missing:
-                    raise RuntimeError("MISSING_CHANNEL_PERMS:" + ",".join(missing))
-
-                # 5) Post in the resolved channel
-                try:
-                    await asyncio.wait_for(channel.send(embed=embed, view=view), timeout=PER_SEND_TIMEOUT)
-                except discord.Forbidden as exc:
-                    # Convert to a clear, actionable runtime error
-                    raise RuntimeError("MISSING_CHANNEL_PERMS:send_messages,embed_links?") from exc
-
-                return 1
-
+                async with pool.acquire() as conn:
+                    rows = await conn.fetch(
+                        "SELECT guild_id, lfg_channel_id FROM guild_settings WHERE lfg_channel_id IS NOT NULL"
+                    )
             except Exception as exc:
-                if isinstance(exc, RuntimeError) and str(exc) in {"NO_LFG_CHANNEL_SET"} or str(exc).startswith("MISSING_CHANNEL_PERMS:"):
-                    raise
-                LOGGER.error("Posting to guild channel failed:\n%s", traceback.format_exc())
-                raise RuntimeError("POST_SEND") from exc
+                LOGGER.error("Guild settings query failed:\n%s", traceback.format_exc())
+                raise RuntimeError("GUILD_QUERY") from exc
+
+            sem = asyncio.Semaphore(MAX_SEND_CONCURRENCY)
+            posted_count = 0
+
+            async def send_one(guild_id: int, channel_id: int) -> bool:
+                guild = self.bot.get_guild(guild_id)
+                if not guild:
+                    return False
+                channel = guild.get_channel(channel_id)
+                if not isinstance(channel, discord.TextChannel):
+                    return False
+
+                # permissions check per target
+                missing = _check_channel_perms(guild, channel)
+                if missing:
+                    LOGGER.info("Skip %s#%s (missing perms: %s)", guild_id, channel_id, missing)
+                    return False
+
+                async with sem:
+                    try:
+                        await asyncio.wait_for(channel.send(embed=embed, view=view), timeout=PER_SEND_TIMEOUT)
+                        return True
+                    except (discord.Forbidden, discord.HTTPException, asyncio.TimeoutError) as exc:
+                        LOGGER.info("Send to %s#%s failed: %r", guild.name if guild else guild_id, channel_id, exc)
+                        return False
+
+            tasks = [
+                asyncio.create_task(send_one(int(r["guild_id"]), int(r["lfg_channel_id"])))
+                for r in rows
+            ]
+
+            for coro in asyncio.as_completed(tasks):
+                ok = await coro
+                if ok:
+                    posted_count += 1
+
+            return posted_count
 
         # Run and handle outcomes
         try:
             posted = await asyncio.wait_for(do_post_work(), timeout=POST_TIMEOUT_SECONDS)
-        except RuntimeError as exc:
-            msg = str(exc)
-            if msg == "NO_LFG_CHANNEL_SET":
-                try:
-                    await interaction.edit_original_response(
-                        content=(
-                            "Your ad was saved, but this server doesn’t have an LFG channel configured.\n"
-                            "Ask an admin to run `/lfg_channel set #channel`."
-                        )
-                    )
-                except Exception:
-                    pass
-                _refund_cooldown(interaction)
-                return
-
-            if msg.startswith("MISSING_CHANNEL_PERMS:"):
-                missing = msg.split(":", 1)[1] or "unknown"
-                try:
-                    await interaction.edit_original_response(
-                        content=(
-                            f"❌ I don’t have enough permissions in the configured LFG channel.\n"
-                            f"Missing: {_format_missing(missing.split(','))}\n"
-                            f"Ask an admin to grant me those in the channel’s Permissions, or pick another channel with "
-                            f"`/lfg_channel set #channel`.\n\n"
-                        )
-                    )
-                except Exception:
-                    pass
-                _refund_cooldown(interaction)
-                return
-
-            try:
-                await interaction.edit_original_response(
-                    content="Something went wrong while posting your ad. Please try again." + _err_code("POST", exc)
-                )
-            except Exception:
-                pass
-            _refund_cooldown(interaction)
-            return
-
         except asyncio.TimeoutError:
             LOGGER.warning("post() timed out after %ss", POST_TIMEOUT_SECONDS)
             try:
@@ -432,14 +398,17 @@ class LfgAds(commands.Cog):
             if posted == 0:
                 await interaction.edit_original_response(
                     content=(
-                        "Your ad was saved, but no servers have an LFG channel configured yet.\n"
-                        "Ask server owners to run `/lfg_channel set #channel`."
+                        "Your ad was saved, but no servers accepted the post. "
+                        "Check LFG channel permissions or set up channels with `/lfg_channel set #channel`."
                     )
                 )
-                _refund_cooldown(interaction)  # Nothing was posted; don't burn the user's cooldown
+                _refund_cooldown(interaction)  # Nothing posted anywhere; refund
             else:
                 await interaction.edit_original_response(
-                    content="✅ Your ad was posted in this server’s LFG channel."
+                    content=(
+                        "✅ Your ad was posted!"
+                        f"\n• **Servers posted to:** {posted}"
+                    )
                 )
                 await db.stats_inc("ads_posted", 1)
         except (discord.NotFound, discord.HTTPException):
