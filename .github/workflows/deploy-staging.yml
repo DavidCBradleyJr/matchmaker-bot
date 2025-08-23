@@ -23,13 +23,12 @@ jobs:
           STAGING_DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
           INVITE_URL: ${{ secrets.STAGING_PUBLIC_INVITE_URL }}
         run: |
-          # Set all secrets needed by the app; triggers a rolling restart
           flyctl secrets set \
-            DISCORD_TOKEN='$DISCORD_TOKEN' \
-            DATABASE_URL='$DATABASE_URL' \
+            DISCORD_TOKEN="$DISCORD_TOKEN" \
+            DATABASE_URL="$DATABASE_URL" \
             ENVIRONMENT=staging \
-            PUBLIC_INVITE_URL='${INVITE_URL:-}' \
-            STAGING_DATABASE_URL='$STAGING_DATABASE_URL' \
+            PUBLIC_INVITE_URL="${INVITE_URL:-}" \
+            STAGING_DATABASE_URL="$STAGING_DATABASE_URL" \
             -a matchmaker-staging-bot
 
   deploy:
