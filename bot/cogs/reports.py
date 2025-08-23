@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import logging
+from datetime import datetime, timezone, timedelta
 import discord
 from discord import ui
 from discord.ext import commands
@@ -85,14 +86,23 @@ class TimeoutModal(ui.Modal, title="Timeout Reported User"):
         except ValueError:
             await interaction.response.send_message("Enter a valid number of minutes.", ephemeral=True)
             return
+
         try:
-            await moderation_db.create_timeouts_table()
+            # Ensure schema exists (self-healing; safe to call repeatedly)
+            await moderation_db.ensure_user_timeouts_schema()
+
+            # Convert minutes -> concrete until time (UTC).
+            now = datetime.now(timezone.utc)
+            until = now + (timedelta(minutes=mins) if mins > 0 else timedelta(days=36500))  # ~100 years
+
             await moderation_db.add_timeout(
-                self.reported_id,
-                minutes=mins or None,
+                interaction.guild.id,             # guild_id
+                self.reported_id,                 # user_id
+                until,                            # until (datetime)
+                created_by=interaction.user.id,   # moderator id
                 reason=str(self.reason.value).strip(),
-                created_by=interaction.user.id,
             )
+
             # Try to DM the user; ignore failures
             u = interaction.client.get_user(self.reported_id) or await interaction.client.fetch_user(self.reported_id)
             try:
@@ -103,7 +113,10 @@ class TimeoutModal(ui.Modal, title="Timeout Reported User"):
                         await u.send(f"⏱ You’ve been timed out from using the bot **indefinitely**.\nReason: {self.reason.value}")
             except Exception:
                 LOGGER.info("Reported user DM after timeout failed")
+
             await interaction.response.send_message("✅ Timeout recorded.", ephemeral=True)
+
+            # Echo in the mod thread/channel
             try:
                 if isinstance(interaction.channel, discord.TextChannel):
                     await interaction.channel.send(
@@ -111,6 +124,7 @@ class TimeoutModal(ui.Modal, title="Timeout Reported User"):
                     )
             except Exception:
                 pass
+
         except Exception:
             LOGGER.exception("Timeout DB write failed")
             await interaction.response.send_message("Failed to store timeout. Try again.", ephemeral=True)
@@ -251,7 +265,7 @@ class AdReportModal(ui.Modal, title="Report this ad"):
 
             # Ensure tables exist before using moderation view
             await reports_db.create_reports_table()
-            await moderation_db.create_timeouts_table()
+            await moderation_db.ensure_user_timeouts_schema()
 
             await channel.send(
                 embed=embed,
@@ -283,7 +297,7 @@ class Reports(commands.Cog):
 
     async def cog_load(self) -> None:
         await reports_db.create_reports_table()
-        await moderation_db.create_timeouts_table()
+        await moderation_db.ensure_user_timeouts_schema()
 
     async def open_report_modal(self, interaction: discord.Interaction, *, reported_id: int, ad_id: int) -> None:
         if not MAIN_BOT_GUILD_ID or not REPORTS_CATEGORY_ID:
