@@ -4,41 +4,59 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from asyncpg import UndefinedTableError, UndefinedColumnError
+from asyncpg import (
+    UndefinedTableError,
+    UndefinedColumnError,
+    InsufficientPrivilegeError,
+    PostgresError,
+)
 from ..db import get_pool
 
 log = logging.getLogger(__name__)
 
 
-# ---------- Schema management (self-healing) ----------
+# ---------- Schema management (self-healing, DDL-optional) ----------
 
 async def ensure_user_timeouts_schema() -> None:
     """
-    Ensure the user_timeouts table exists and has the columns we write/read.
-    Safe to call repeatedly (idempotent).
+    Ensure the user_timeouts table exists and has expected columns.
+    - If the DB role lacks DDL, we log and continue; writes will then
+      require the table/columns to already exist (via migration).
+    - Safe to call repeatedly (idempotent).
     """
     pool = get_pool()
     if pool is None:
         raise RuntimeError("DB pool is not initialized; check DATABASE_URL and pool init in main().")
 
     async with pool.acquire() as conn:
-        # Create table if missing (with PK on (guild_id, user_id))
-        await conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS user_timeouts (
-                guild_id   BIGINT NOT NULL,
-                user_id    BIGINT NOT NULL,
-                until      TIMESTAMPTZ NOT NULL,
-                reason     TEXT,
-                created_by BIGINT,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                PRIMARY KEY (guild_id, user_id)
+        # Try to create table (if we have DDL privileges)
+        try:
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_timeouts (
+                    guild_id   BIGINT NOT NULL,
+                    user_id    BIGINT NOT NULL,
+                    until      TIMESTAMPTZ NOT NULL,
+                    reason     TEXT,
+                    created_by BIGINT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (guild_id, user_id)
+                )
+                """
             )
-            """
-        )
-        # Add columns if the table pre-existed without them
-        await conn.execute("ALTER TABLE user_timeouts ADD COLUMN IF NOT EXISTS reason TEXT")
-        await conn.execute("ALTER TABLE user_timeouts ADD COLUMN IF NOT EXISTS created_by BIGINT")
+        except InsufficientPrivilegeError:
+            log.warning("No DDL privilege to CREATE user_timeouts; relying on existing schema.")
+            return
+
+        # Try to add columns if missing (best-effort)
+        for stmt in (
+            "ALTER TABLE user_timeouts ADD COLUMN IF NOT EXISTS reason TEXT",
+            "ALTER TABLE user_timeouts ADD COLUMN IF NOT EXISTS created_by BIGINT",
+        ):
+            try:
+                await conn.execute(stmt)
+            except InsufficientPrivilegeError:
+                log.warning("No DDL privilege to ALTER user_timeouts; column ensure skipped.")
 
 
 # ---------- Writes ----------
@@ -56,26 +74,27 @@ async def add_timeout(
     - If a row exists, overwrite until/reason/created_by.
     - If not, insert a new row.
 
-    Mirrors the UPSERT style used elsewhere in db.py (ON CONFLICT DO UPDATE).
+    If the schema/columns are missing and we cannot DDL, a clear RuntimeError is raised.
     """
     pool = get_pool()
     if pool is None:
         raise RuntimeError("DB pool is not initialized; check DATABASE_URL and pool init in main().")
 
-    # Ensure schema, then write
+    # Best-effort schema ensure (no-op if role can't DDL)
     await ensure_user_timeouts_schema()
 
     async with pool.acquire() as conn:
+        UPSERT = """
+            INSERT INTO user_timeouts (guild_id, user_id, until, reason, created_by)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (guild_id, user_id) DO UPDATE
+            SET until = EXCLUDED.until,
+                reason = EXCLUDED.reason,
+                created_by = EXCLUDED.created_by
+        """
         try:
             await conn.execute(
-                """
-                INSERT INTO user_timeouts (guild_id, user_id, until, reason, created_by)
-                VALUES ($1, $2, $3, $4, $5)
-                ON CONFLICT (guild_id, user_id) DO UPDATE
-                SET until = EXCLUDED.until,
-                    reason = EXCLUDED.reason,
-                    created_by = EXCLUDED.created_by
-                """,
+                UPSERT,
                 int(guild_id),
                 int(user_id),
                 until,
@@ -83,23 +102,26 @@ async def add_timeout(
                 created_by,
             )
         except (UndefinedTableError, UndefinedColumnError):
-            # In case another process is mid-deploy, heal then retry once.
+            # Heal (if possible) then retry once
             await ensure_user_timeouts_schema()
-            await conn.execute(
-                """
-                INSERT INTO user_timeouts (guild_id, user_id, until, reason, created_by)
-                VALUES ($1, $2, $3, $4, $5)
-                ON CONFLICT (guild_id, user_id) DO UPDATE
-                SET until = EXCLUDED.until,
-                    reason = EXCLUDED.reason,
-                    created_by = EXCLUDED.created_by
-                """,
-                int(guild_id),
-                int(user_id),
-                until,
-                reason,
-                created_by,
-            )
+            try:
+                await conn.execute(
+                    UPSERT,
+                    int(guild_id),
+                    int(user_id),
+                    until,
+                    reason,
+                    created_by,
+                )
+            except (UndefinedTableError, UndefinedColumnError, InsufficientPrivilegeError) as exc:
+                # Bubble a clear, actionable error
+                raise RuntimeError("MISSING_USER_TIMEOUTS_SCHEMA_OR_DDL_PRIVS") from exc
+        except InsufficientPrivilegeError as exc:
+            # INSERT itself failed because of privileges
+            raise RuntimeError("DB_WRITE_INSUFFICIENT_PRIVILEGE") from exc
+        except PostgresError as exc:
+            # Any other asyncpg/Postgres error; surface a stable message upward
+            raise RuntimeError(f"DB_WRITE_FAILED: {type(exc).__name__}") from exc
 
 
 async def clear_timeout(guild_id: int, user_id: int) -> None:

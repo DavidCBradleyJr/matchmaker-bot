@@ -127,19 +127,16 @@ class TimeoutModal(ui.Modal, title="Timeout Reported User"):
             except Exception:
                 pass
 
-        except Exception:
+        except Exception as exc:
             LOGGER.exception("Timeout DB write failed")
-            # Give a slightly more actionable error to mods
+            diag = f"\n\nDebug: {type(exc).__name__}: {str(exc)[:180]}" if (isinstance(interaction.user, discord.Member) and _is_mod(interaction.user)) else ""
+            base = ("Failed to store timeout. Try again."
+                    " If this keeps happening, verify the app’s DATABASE_URL points to the DB you migrated"
+                    " and that the DB role can INSERT (DDL optional).")
             if not interaction.response.is_done():
-                await interaction.response.send_message(
-                    "Failed to store timeout. Try again. If this keeps happening, re-run the command after checking the app's DATABASE_URL and DB perms.",
-                    ephemeral=True
-                )
+                await interaction.response.send_message(base + diag, ephemeral=True)
             else:
-                await interaction.followup.send(
-                    "Failed to store timeout. Try again. If this keeps happening, re-run the command after checking the app's DATABASE_URL and DB perms.",
-                    ephemeral=True
-                )
+                await interaction.followup.send(base + diag, ephemeral=True)
 
 class ReportModerationView(ui.View):
     def __init__(self, *, report_id: int, reporter_id: int, reported_id: int, ad_id: int, origin_guild_id: int, ad_jump: str | None):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import traceback
 from datetime import datetime, timezone
 
@@ -40,6 +41,8 @@ SURFACE_ERROR_CODE = os.getenv("LFG_SURFACE_ERROR_CODE", "1") == "1"
 # ---------------------
 # Utilities
 # ---------------------
+
+AD_ID_RE = re.compile(r"Ad\s*#\s*(\d+)", re.IGNORECASE)
 
 async def safe_ack(
     interaction: discord.Interaction,
@@ -116,13 +119,42 @@ def _rel(ts: datetime | None) -> str:
     except Exception:
         return ts.isoformat()
 
+
+def _extract_ad_id_from_message(msg: discord.Message | None) -> int | None:
+    if not msg:
+        return None
+    try:
+        for emb in msg.embeds or ():
+            if emb.footer and emb.footer.text:
+                m = AD_ID_RE.search(emb.footer.text)
+                if m:
+                    return int(m.group(1))
+            if emb.title:
+                m = AD_ID_RE.search(emb.title)
+                if m:
+                    return int(m.group(1))
+            if emb.description:
+                m = AD_ID_RE.search(emb.description)
+                if m:
+                    return int(m.group(1))
+    except Exception:
+        pass
+    return None
+
 # ---------------------
-# Button View
+# Button View (Persistent)
 # ---------------------
 
 class ConnectButton(ui.View):
-    def __init__(self, ad_id: int, *, timeout: float | None = 1800):
-        super().__init__(timeout=timeout)
+    """
+    Persistent actions for an LFG ad.
+    - timeout=None => persistent across restarts
+    - custom_ids are stable ('lfg:connect', 'lfg:report') so a single instance
+      registered on boot can handle ALL historical messages.
+    - ad_id is resolved from the embed if not present (post-restart case).
+    """
+    def __init__(self, ad_id: int | None = None, *, timeout: float | None = None):
+        super().__init__(timeout=timeout)  # None = persistent
         self.ad_id = ad_id
 
     @ui.button(label="I’m interested", style=discord.ButtonStyle.success, custom_id="lfg:connect")
@@ -144,6 +176,16 @@ class ConnectButton(ui.View):
             except Exception:
                 LOGGER.exception("Timeout check failed in ConnectButton.connect; allowing")
 
+            # Resolve ad_id (works pre- and post-restart)
+            ad_id = self.ad_id or _extract_ad_id_from_message(interaction.message)
+            if not ad_id:
+                if acked and not sent_followup:
+                    await interaction.followup.send(
+                        "This ad can’t be identified anymore. It might be too old or malformed.",
+                        ephemeral=True,
+                    )
+                return
+
             user = interaction.user
             pool = get_pool()
             if pool is None:
@@ -159,7 +201,7 @@ class ConnectButton(ui.View):
                     """,
                     int(user.id),
                     str(user),
-                    self.ad_id,
+                    int(ad_id),
                 )
                 await db.stats_inc("connections_made", 1)
 
@@ -178,7 +220,7 @@ class ConnectButton(ui.View):
             if owner_user:
                 try:
                     await owner_user.send(
-                        f"✅ Someone is interested in your **{ad['game']}** ad (#{self.ad_id}).\n"
+                        f"✅ Someone is interested in your **{ad['game']}** ad (#{ad_id}).\n"
                         f"Connector: {user.mention}"
                     )
                 except Exception:
@@ -188,7 +230,7 @@ class ConnectButton(ui.View):
                 await send_pretty_interest_dm(
                     recipient=user,
                     poster=owner_user,
-                    ad_id=self.ad_id,
+                    ad_id=int(ad_id),
                     game=ad["game"],
                     notes=ad["notes"],
                     message_jump=interaction.message.jump_url if interaction.message else None,
@@ -237,10 +279,19 @@ class ConnectButton(ui.View):
             pool = get_pool()
             if pool is None:
                 raise RuntimeError("DB pool is not initialized; check DATABASE_URL and pool init in main().")
+
+            ad_id = self.ad_id or _extract_ad_id_from_message(interaction.message)
+            if not ad_id:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("This ad can’t be identified anymore.", ephemeral=True)
+                else:
+                    await interaction.followup.send("This ad can’t be identified anymore.", ephemeral=True)
+                return
+
             async with pool.acquire() as conn:
                 ad_row = await conn.fetchrow(
                     "SELECT id, author_id FROM lfg_ads WHERE id = $1",
-                    int(self.ad_id),
+                    int(ad_id),
                 )
             if not ad_row:
                 if not interaction.response.is_done():
@@ -259,7 +310,7 @@ class ConnectButton(ui.View):
                     await interaction.followup.send("Reporting isn’t available right now. Try again later.", ephemeral=True)
                 return
 
-            await reports_cog.open_report_modal(interaction, reported_id=reported_id, ad_id=int(self.ad_id))
+            await reports_cog.open_report_modal(interaction, reported_id=reported_id, ad_id=int(ad_id))
 
         except Exception:
             LOGGER.exception("Failed to open report modal")
@@ -275,6 +326,11 @@ class ConnectButton(ui.View):
 class LfgAds(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+
+    async def cog_load(self) -> None:
+        # Register a persistent handler for all existing messages that have our stable custom_ids.
+        # New posts also use this same class; if self.ad_id is missing (post-restart), we parse it from the embed.
+        self.bot.add_view(ConnectButton(ad_id=None, timeout=None))
 
     lfg = app_commands.Group(name="lfg_ad", description="Create and manage LFG ads")
 
@@ -295,6 +351,7 @@ class LfgAds(commands.Cog):
         region: str | None = None,
         notes: str | None = None,
     ):
+        # Timeout gate BEFORE we ack or do any DB work
         try:
             if await moderation_db.is_user_timed_out(interaction.guild.id, interaction.user.id):
                 until = await moderation_db.get_timeout_until(interaction.guild.id, interaction.user.id)
@@ -357,7 +414,8 @@ class LfgAds(commands.Cog):
                     text=f"Posted by {interaction.user} • Ad #{ad_id} • Powered by Matchmaker",
                     icon_url="https://i.imgur.com/4x9pIr0.png"
                 )
-                view = ConnectButton(ad_id=ad_id)
+                # PERSISTENT view; stores ad_id for fast path, but works post-restart via footer parsing
+                view = ConnectButton(ad_id=ad_id, timeout=None)
             except Exception as exc:
                 LOGGER.error("Building embed failed:\n%s", traceback.format_exc())
                 raise RuntimeError("EMBED_BUILD") from exc
