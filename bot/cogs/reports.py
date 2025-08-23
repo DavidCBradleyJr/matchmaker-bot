@@ -226,12 +226,11 @@ class ReportModerationView(ui.View):
         try:
             channel = interaction.channel
             if isinstance(channel, discord.TextChannel):
-                # Rename if needed
                 name = channel.name
                 if not name.startswith("resolved-"):
                     await channel.edit(name=f"resolved-{name}", reason=f"Report #{rid or '?'} resolved")
 
-                # Lock the channel by denying send-like perms
+                # lock sends + threads
                 ow = channel.overwrites
 
                 def _deny_send_like(po: discord.PermissionOverwrite) -> discord.PermissionOverwrite:
@@ -245,19 +244,16 @@ class ReportModerationView(ui.View):
                 po = ow.get(channel.guild.default_role, discord.PermissionOverwrite())
                 ow[channel.guild.default_role] = _deny_send_like(po)
 
-                # Any role with an overwrite — ensure sends are denied
+                # any role that already has an overwrite -> deny sends
                 for target, po in list(ow.items()):
                     if isinstance(target, discord.Role):
                         po = po or discord.PermissionOverwrite()
-                        if po.send_messages is True or po.send_messages is None:
-                            ow[target] = _deny_send_like(po)
+                        ow[target] = _deny_send_like(po)
 
                 await channel.edit(overwrites=ow, reason=f"Report #{rid or '?'} closed")
 
-            # Respond to clicker
             await interaction.response.send_message("✅ Report closed and channel locked.", ephemeral=True)
 
-            # Notify the room (best-effort)
             try:
                 await channel.send(f"🟢 **Resolved by** {interaction.user.mention} — report #{rid or '?'}")
             except Exception:

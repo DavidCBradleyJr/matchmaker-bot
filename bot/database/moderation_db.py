@@ -16,47 +16,57 @@ log = logging.getLogger(__name__)
 
 TABLE_FQN = "public.user_timeouts"  # schema-qualify to avoid search_path surprises
 
+
 # ---------- Schema management (self-healing, DDL-optional) ----------
 
 async def ensure_user_timeouts_schema() -> None:
     """
-    Ensure the user_timeouts table exists and has expected columns.
-    - If the DB role lacks DDL, we log and continue; writes will then
-      require the table/columns to already exist (via migration).
-    - Safe to call repeatedly (idempotent).
+    Ensure the user_timeouts table exists and has expected shape.
+    Idempotent; best-effort if the role lacks DDL (we log and continue).
     """
     pool = get_pool()
     if pool is None:
         raise RuntimeError("DB pool is not initialized; check DATABASE_URL and pool init in main().")
 
     async with pool.acquire() as conn:
-        # Try to create table (if we have DDL privileges)
+        # Create (columns minimal) if we can
         try:
             await conn.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS {TABLE_FQN} (
-                    guild_id   BIGINT NOT NULL,
-                    user_id    BIGINT NOT NULL,
-                    until      TIMESTAMPTZ NOT NULL,
-                    reason     TEXT,
-                    created_by BIGINT,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    PRIMARY KEY (guild_id, user_id)
+                    guild_id BIGINT NOT NULL,
+                    user_id  BIGINT NOT NULL
                 )
                 """
             )
         except InsufficientPrivilegeError:
-            log.warning("No DDL privilege to CREATE %s; will still attempt ALTER checks.", TABLE_FQN)
+            log.warning("No DDL privilege to CREATE %s; attempting column/index checks anyway.", TABLE_FQN)
 
-        # Try to add columns if missing (best-effort)
-        for stmt in (
+        # Columns (add if missing)
+        alter_statements = [
+            # add core columns if missing
+            f"ALTER TABLE {TABLE_FQN} ADD COLUMN IF NOT EXISTS until TIMESTAMPTZ",
             f"ALTER TABLE {TABLE_FQN} ADD COLUMN IF NOT EXISTS reason TEXT",
             f"ALTER TABLE {TABLE_FQN} ADD COLUMN IF NOT EXISTS created_by BIGINT",
-        ):
+            f"ALTER TABLE {TABLE_FQN} ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ",
+            # backfill NULLs to satisfy NOT NULLs
+            f"UPDATE {TABLE_FQN} SET until = NOW() WHERE until IS NULL",
+            f"UPDATE {TABLE_FQN} SET created_at = NOW() WHERE created_at IS NULL",
+            # enforce NOT NULL where expected
+            f"ALTER TABLE {TABLE_FQN} ALTER COLUMN until SET NOT NULL",
+            f"ALTER TABLE {TABLE_FQN} ALTER COLUMN created_at SET NOT NULL",
+            # ensure unique index for ON CONFLICT (guild_id,user_id)
+            "CREATE UNIQUE INDEX IF NOT EXISTS user_timeouts_guild_user_uidx "
+            f"ON {TABLE_FQN} (guild_id, user_id)",
+        ]
+        for stmt in alter_statements:
             try:
                 await conn.execute(stmt)
             except InsufficientPrivilegeError:
-                log.warning("No DDL privilege to ALTER %s; column ensure skipped.", TABLE_FQN)
+                log.warning("No DDL privilege for: %s", stmt)
+            except PostgresError as exc:
+                # Non-fatal: if the column already matches or small race, continue.
+                log.debug("Postgres notice during ensure: %s: %s", type(exc).__name__, exc)
 
 
 # ---------- Writes ----------
@@ -71,9 +81,6 @@ async def add_timeout(
 ) -> None:
     """
     Upsert a timeout for (guild_id, user_id).
-    - If a row exists, overwrite until/reason/created_by.
-    - If not, insert a new row.
-
     If the schema/columns are missing and we cannot DDL, a clear RuntimeError is raised.
     """
     pool = get_pool()
@@ -114,21 +121,18 @@ async def add_timeout(
                     created_by,
                 )
             except (UndefinedTableError, UndefinedColumnError, InsufficientPrivilegeError):
-                # Double-check if the table actually exists in 'public'
                 exists = await conn.fetchval(
                     """
-                    SELECT 1 FROM information_schema.tables
-                    WHERE table_schema='public' AND table_name='user_timeouts'
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema='public' AND table_name='user_timeouts' AND column_name='until'
                     """
                 )
                 if not exists:
                     raise RuntimeError("USER_TIMEOUTS_TABLE_MISSING")
                 raise RuntimeError("MISSING_USER_TIMEOUTS_SCHEMA_OR_DDL_PRIVS")
         except InsufficientPrivilegeError as exc:
-            # INSERT itself failed because of privileges
             raise RuntimeError("DB_WRITE_INSUFFICIENT_PRIVILEGE") from exc
         except PostgresError as exc:
-            # Any other asyncpg/Postgres error; surface a stable message upward
             raise RuntimeError(f"DB_WRITE_FAILED: {type(exc).__name__}") from exc
 
 
@@ -146,17 +150,13 @@ async def clear_timeout(guild_id: int, user_id: int) -> None:
                 int(user_id),
             )
         except (UndefinedTableError, UndefinedColumnError):
-            # Table/column missing => nothing to clear.
             return
 
 
 # ---------- Reads ----------
 
 async def get_timeout_until(guild_id: int, user_id: int) -> Optional[datetime]:
-    """
-    Return the 'until' timestamp if a timeout exists for the user,
-    else None.
-    """
+    """Return the 'until' timestamp if a timeout exists, else None."""
     pool = get_pool()
     if pool is None:
         raise RuntimeError("DB pool is not initialized; check DATABASE_URL and pool init in main().")
@@ -174,9 +174,7 @@ async def get_timeout_until(guild_id: int, user_id: int) -> Optional[datetime]:
 
 
 async def is_user_timed_out(guild_id: int, user_id: int, *, now: Optional[datetime] = None) -> bool:
-    """
-    True if the user has a timeout with until > now.
-    """
+    """True if the user has a timeout with until > now."""
     now = now or datetime.now(timezone.utc)
     until = await get_timeout_until(int(guild_id), int(user_id))
     return bool(until and until > now)
