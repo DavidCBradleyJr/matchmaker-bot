@@ -285,6 +285,7 @@ class ConnectButton(ui.View):
             if not reports_cog:
                 try:
                     await interaction.client.load_extension("bot.cogs.reports")
+                    LOGGER.info("Lazy-loaded bot.cogs.reports for Report button.")
                 except commands.ExtensionAlreadyLoaded:
                     pass
                 except Exception:
@@ -316,6 +317,17 @@ class LfgAds(commands.Cog):
     async def cog_load(self) -> None:
         # Register persistent view for old messages
         self.bot.add_view(ConnectButton(ad_id=None, timeout=None))
+
+        # ✅ Ensure the Reports cog is loaded at startup so its persistent views work after restart
+        try:
+            if not self.bot.get_cog("Reports"):
+                await self.bot.load_extension("bot.cogs.reports")
+                LOGGER.info("Auto-loaded bot.cogs.reports on startup so persistent report buttons are live.")
+        except commands.ExtensionAlreadyLoaded:
+            pass
+        except Exception:
+            LOGGER.exception("Failed to auto-load bot.cogs.reports")
+
         # Make sure cooldowns table exists (no-op if already there)
         try:
             await cooldowns_db.ensure_cooldowns_schema()
@@ -496,7 +508,6 @@ class LfgAds(commands.Cog):
                         "Check LFG channel permissions or set up channels with `/lfg_channel set #channel`."
                     )
                 )
-                # No cooldown set (nothing posted)
             else:
                 await interaction.edit_original_response(
                     content=(
