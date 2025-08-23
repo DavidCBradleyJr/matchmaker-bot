@@ -10,13 +10,11 @@ import discord
 from discord import ui
 from discord.ext import commands
 
-from ..db import get_pool
-from ..database import reports_db, moderation_db
+from .database import reports_db, moderation_db
 
 LOGGER = logging.getLogger("reports")
 if not LOGGER.handlers:
     import sys
-
     h = logging.StreamHandler(stream=sys.stdout)
     fmt = logging.Formatter("[%(asctime)s] %(levelname)s reports: %(message)s")
     h.setFormatter(fmt)
@@ -544,6 +542,7 @@ class Reports(commands.Cog):
         self.bot = bot
 
     async def cog_load(self) -> None:
+        # Best-effort schema ensure (safe if function is absent)
         try:
             await reports_db.create_reports_table()
         except Exception:
@@ -554,7 +553,7 @@ class Reports(commands.Cog):
         self.bot.add_view(ReportModerationView(
             report_id=None, reporter_id=None, reported_id=None, ad_id=None, origin_guild_id=None, ad_jump=None
         ))
-        self.bot.add_view(ReporterReplyView())  # NEW
+        self.bot.add_view(ReporterReplyView())  # ensure DM reply button works across restarts
 
         LOGGER.info("Reports cog loaded; reporter DM reply button ready.")
 
