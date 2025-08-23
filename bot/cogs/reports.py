@@ -38,6 +38,10 @@ def _is_mod(member: discord.Member) -> bool:
     return bool(p.manage_guild or p.manage_channels or p.administrator)
 
 def _parse_ctx_from_message(msg: discord.Message | None) -> dict[str, int | None]:
+    """
+    Try to recover report context from the message/channel so buttons work after restarts.
+    Returns keys: report_id, reported_id, ad_id, origin_guild_id (values or None).
+    """
     report_id = reported_id = ad_id = origin_guild_id = None
     if not msg:
         return {"report_id": None, "reported_id": None, "ad_id": None, "origin_guild_id": None}
@@ -101,9 +105,10 @@ class WarnReportedModal(ui.Modal, title="Warn Reported User"):
             await interaction.response.send_message("Couldn’t DM the user (DMs may be closed).", ephemeral=True)
 
 class TimeoutModal(ui.Modal, title="Timeout Reported User"):
-    def __init__(self, reported_id: int):
+    def __init__(self, reported_id: int, origin_guild_id: int | None):
         super().__init__(timeout=180)
         self.reported_id = int(reported_id)
+        self.origin_guild_id = int(origin_guild_id) if origin_guild_id else None
         self.minutes = ui.TextInput(
             label="Duration (minutes, 0 = indefinite)",
             required=True,
@@ -115,42 +120,57 @@ class TimeoutModal(ui.Modal, title="Timeout Reported User"):
         self.add_item(self.reason)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        # Parse minutes
         try:
             mins = max(0, int(str(self.minutes.value).strip()))
         except ValueError:
             await interaction.response.send_message("Enter a valid number of minutes.", ephemeral=True)
             return
 
+        # Figure out which guild to apply the timeout in (origin server, not the reports guild)
+        ctx_gid = self.origin_guild_id
+        if not ctx_gid:
+            ctx = _parse_ctx_from_message(interaction.message)
+            ctx_gid = ctx["origin_guild_id"] or (interaction.guild.id if interaction.guild else None)
+        if not ctx_gid:
+            await interaction.response.send_message("Couldn’t identify the origin server for this report.", ephemeral=True)
+            return
+
         try:
+            # Ensure schema exists (safe to call repeatedly)
             await moderation_db.ensure_user_timeouts_schema()
 
+            # Build 'until' in UTC
             now = datetime.now(timezone.utc)
-            until = now + (timedelta(minutes=mins) if mins > 0 else timedelta(days=36500))
+            until = now + (timedelta(minutes=mins) if mins > 0 else timedelta(days=36500))  # ~100 years
 
+            # Store timeout against the ORIGIN GUILD
             await moderation_db.add_timeout(
-                interaction.guild.id,
+                int(ctx_gid),
                 self.reported_id,
                 until,
                 created_by=interaction.user.id,
                 reason=str(self.reason.value).strip(),
             )
 
+            # Try to DM the user; ignore failures
             u = interaction.client.get_user(self.reported_id) or await interaction.client.fetch_user(self.reported_id)
             try:
                 if u:
                     if mins > 0:
-                        await u.send(f"⏱ You’ve been timed out from using the bot for **{mins} minutes**.\nReason: {self.reason.value}")
+                        await u.send(f"⏱ You’ve been timed out from using the bot for **{mins} minutes** in that server.\nReason: {self.reason.value}")
                     else:
-                        await u.send(f"⏱ You’ve been timed out from using the bot **indefinitely**.\nReason: {self.reason.value}")
+                        await u.send(f"⏱ You’ve been timed out from using the bot **indefinitely** in that server.\nReason: {self.reason.value}")
             except Exception:
                 LOGGER.info("Reported user DM after timeout failed")
 
             await interaction.response.send_message("✅ Timeout recorded.", ephemeral=True)
 
+            # Echo in the mod thread/channel (best-effort)
             try:
                 if isinstance(interaction.channel, discord.TextChannel):
                     await interaction.channel.send(
-                        f"⏱ **Timeout applied** to `<@{self.reported_id}>` by {interaction.user.mention}."
+                        f"⏱ **Timeout applied** to `<@{self.reported_id}>` by {interaction.user.mention} (server `{ctx_gid}`)."
                     )
             except Exception:
                 pass
@@ -208,10 +228,14 @@ class ReportModerationView(ui.View):
     async def timeout_reported(self, interaction: discord.Interaction, button: ui.Button):
         ctx = _parse_ctx_from_message(interaction.message)
         target_id = ctx["reported_id"] or self.reported_id
+        ogid = ctx["origin_guild_id"] or self.origin_guild_id
         if not target_id:
             await interaction.response.send_message("Can’t identify the reported user on this message.", ephemeral=True)
             return
-        await interaction.response.send_modal(TimeoutModal(int(target_id)))
+        if not ogid:
+            await interaction.response.send_message("Can’t identify which server to apply the timeout to.", ephemeral=True)
+            return
+        await interaction.response.send_modal(TimeoutModal(int(target_id), int(ogid)))
 
     @ui.button(label="Resolve / Close", style=discord.ButtonStyle.success, custom_id="report:resolve")
     async def resolve_close(self, interaction: discord.Interaction, button: ui.Button):
@@ -288,6 +312,7 @@ class AdReportModal(ui.Modal, title="Report this ad"):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         desc = str(self.description.value).strip()
         try:
+            # Insert + get snapshot count
             report_id, total_reports = await reports_db.insert_report(
                 origin_guild_id=self.origin_guild_id,
                 reporter_id=int(self.reporter.id),
@@ -297,6 +322,7 @@ class AdReportModal(ui.Modal, title="Report this ad"):
                 description=desc,
             )
 
+            # Locate main guild/category
             main_guild = interaction.client.get_guild(MAIN_BOT_GUILD_ID)
             if not main_guild:
                 main_guild = await interaction.client.fetch_guild(MAIN_BOT_GUILD_ID)
@@ -337,6 +363,7 @@ class AdReportModal(ui.Modal, title="Report this ad"):
             if jump:
                 embed.add_field(name="Original Message", value=f"[Jump to message]({jump})", inline=False)
 
+            # Ensure tables exist before using moderation view
             await reports_db.create_reports_table()
             await moderation_db.ensure_user_timeouts_schema()
 
@@ -371,7 +398,7 @@ class Reports(commands.Cog):
     async def cog_load(self) -> None:
         await reports_db.create_reports_table()
         await moderation_db.ensure_user_timeouts_schema()
-        # persistent handler so old messages keep working
+        # Register a persistent stateless handler so buttons on old messages work after restarts.
         self.bot.add_view(ReportModerationView(
             report_id=None, reporter_id=None, reported_id=None, ad_id=None, origin_guild_id=None, ad_jump=None
         ))
