@@ -392,7 +392,6 @@ class LfgAds(commands.Cog):
                             f"Missing: {_format_missing(missing.split(','))}\n"
                             f"Ask an admin to grant me those in the channel’s Permissions, or pick another channel with "
                             f"`/lfg_channel set #channel`.\n\n"
-                            f"Tip: both **Prod** and **Staging** bots need permissions if both will post."
                         )
                     )
                 except Exception:
