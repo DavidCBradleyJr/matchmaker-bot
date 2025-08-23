@@ -259,7 +259,6 @@ class ConnectButton(ui.View):
     @ui.button(label="Report", style=discord.ButtonStyle.danger, custom_id="lfg:report")
     async def report(self, interaction: discord.Interaction, button: ui.Button):
         """Open a modal to report this ad; routes to main bot guild Reports category."""
-        acked = await safe_ack(interaction, ephemeral=True, use_thinking=False)  # ✅ SAFE DEFER
         try:
             pool = get_pool()
             if pool is None:
@@ -267,11 +266,7 @@ class ConnectButton(ui.View):
 
             ad_id = self.ad_id or _extract_ad_id_from_message(interaction.message)
             if not ad_id:
-                msg = "This ad can’t be identified anymore."
-                if acked:
-                    await interaction.followup.send(msg, ephemeral=True)
-                else:
-                    await interaction.response.send_message(msg, ephemeral=True)
+                await interaction.response.send_message("This ad can’t be identified anymore.", ephemeral=True)
                 return
 
             async with pool.acquire() as conn:
@@ -280,16 +275,12 @@ class ConnectButton(ui.View):
                     int(ad_id),
                 )
             if not ad_row:
-                msg = "This ad no longer exists."
-                if acked:
-                    await interaction.followup.send(msg, ephemeral=True)
-                else:
-                    await interaction.response.send_message(msg, ephemeral=True)
+                await interaction.response.send_message("This ad no longer exists.", ephemeral=True)
                 return
 
             reported_id = int(ad_row["author_id"])
 
-            # ✅ Try to obtain (or lazy-load) the Reports cog so the modal is always available
+            # Ensure Reports cog is available BEFORE sending the modal
             reports_cog = interaction.client.get_cog("Reports")
             if not reports_cog:
                 try:
@@ -301,18 +292,15 @@ class ConnectButton(ui.View):
                 reports_cog = interaction.client.get_cog("Reports")
 
             if not reports_cog or not hasattr(reports_cog, "open_report_modal"):
-                msg = "Reporting isn’t available right now. Try again later."
-                if acked:
-                    await interaction.followup.send(msg, ephemeral=True)
-                else:
-                    await interaction.response.send_message(msg, ephemeral=True)
+                await interaction.response.send_message("Reporting isn’t available right now. Try again later.", ephemeral=True)
                 return
 
+            # First response must be the modal:
             await reports_cog.open_report_modal(interaction, reported_id=reported_id, ad_id=int(ad_id))
 
         except Exception:
             LOGGER.exception("Failed to open report modal")
-            if acked:
+            if interaction.response.is_done():
                 await interaction.followup.send("Something went wrong while opening the report form.", ephemeral=True)
             else:
                 await interaction.response.send_message("Something went wrong while opening the report form.", ephemeral=True)
