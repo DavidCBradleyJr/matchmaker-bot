@@ -110,9 +110,7 @@ def _extract_ad_id_from_message(msg: discord.Message | None) -> int | None:
     return None
 
 class ConnectButton(ui.View):
-    """
-    Persistent actions for an LFG ad.
-    """
+    """Persistent actions for an LFG ad."""
     def __init__(self, ad_id: int | None = None, *, timeout: float | None = None):
         super().__init__(timeout=timeout)  # None = persistent
         self.ad_id = ad_id
@@ -122,7 +120,7 @@ class ConnectButton(ui.View):
         acked = await safe_ack(interaction, message=None, ephemeral=True, use_thinking=False)
         sent_followup = False
         try:
-            # ✅ GLOBAL timeout gate first
+            # GLOBAL timeout gate first
             try:
                 if await moderation_db.is_user_globally_timed_out(interaction.user.id):
                     until = await moderation_db.get_global_timeout_until(interaction.user.id)
@@ -310,7 +308,7 @@ class LfgAds(commands.Cog):
         region: str | None = None,
         notes: str | None = None,
     ):
-        # ✅ GLOBAL timeout gate first
+        # GLOBAL timeout gate first
         try:
             if await moderation_db.is_user_globally_timed_out(interaction.user.id):
                 until = await moderation_db.get_global_timeout_until(interaction.user.id)
@@ -322,7 +320,7 @@ class LfgAds(commands.Cog):
         except Exception:
             LOGGER.exception("Global timeout check failed in /lfg_ad post; allowing command to proceed")
 
-        # (Optional) per-guild gate kept for compatibility with older data
+        # Per-guild gate (optional, backward-compatible)
         try:
             if await moderation_db.is_user_timed_out(interaction.guild.id, interaction.user.id):
                 until = await moderation_db.get_timeout_until(interaction.guild.id, interaction.user.id)
@@ -334,7 +332,7 @@ class LfgAds(commands.Cog):
         except Exception:
             LOGGER.exception("Per-guild timeout check failed in /lfg_ad post; allowing command to proceed")
 
-        # ---- GLOBAL cooldown (DB) AFTER timeout gate ----
+        # GLOBAL cooldown (DB)
         now = datetime.now(timezone.utc)
         try:
             next_ok = await cooldowns_db.get_next_ok_at(interaction.user.id)
@@ -351,12 +349,23 @@ class LfgAds(commands.Cog):
         if not acked:
             return
 
-        async def do_post_work() -> int:
+        async def do_post_work() -> tuple[int, int | None]:
+            """
+            Returns (posted_count, ad_id_if_inserted)
+            """
             pool = get_pool()
             if pool is None:
                 raise RuntimeError("DB pool is not initialized; check DATABASE_URL and pool init in main().")
 
-            # 1) Insert ad
+            # 0) Find all configured destinations FIRST
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT guild_id, lfg_channel_id FROM guild_settings WHERE lfg_channel_id IS NOT NULL"
+                )
+            if not rows:
+                return (0, None)  # no insert, nothing to post
+
+            # 1) INSERT the ad now that we know there are destinations
             async with pool.acquire() as conn:
                 ad_id = await conn.fetchval(
                     """
@@ -372,7 +381,7 @@ class LfgAds(commands.Cog):
                     notes,
                 )
 
-            # 2) Embed/view
+            # 2) Build embed/view
             title_bits: list[str] = [game]
             if platform:
                 title_bits.append(f"• {platform}")
@@ -391,12 +400,7 @@ class LfgAds(commands.Cog):
             )
             view = ConnectButton(ad_id=ad_id, timeout=None)
 
-            # 3) Broadcast
-            async with pool.acquire() as conn:
-                rows = await conn.fetch(
-                    "SELECT guild_id, lfg_channel_id FROM guild_settings WHERE lfg_channel_id IS NOT NULL"
-                )
-
+            # 3) Try to send everywhere (best-effort)
             sem = asyncio.Semaphore(MAX_SEND_CONCURRENCY)
             posted_count = 0
 
@@ -423,10 +427,12 @@ class LfgAds(commands.Cog):
                 if await coro:
                     posted_count += 1
 
-            return posted_count
+            return (posted_count, int(ad_id))
 
+        # Run and handle outcomes
+        ad_id_inserted: int | None = None
         try:
-            posted = await asyncio.wait_for(do_post_work(), timeout=POST_TIMEOUT_SECONDS)
+            posted, ad_id_inserted = await asyncio.wait_for(do_post_work(), timeout=POST_TIMEOUT_SECONDS)
         except asyncio.TimeoutError:
             LOGGER.warning("post() timed out after %ss", POST_TIMEOUT_SECONDS)
             try:
@@ -445,26 +451,48 @@ class LfgAds(commands.Cog):
                 pass
             return
 
+        # Present outcome + manage cooldown + cleanup if needed
         try:
+            if ad_id_inserted is None:
+                # We never inserted (no destinations configured)
+                await interaction.edit_original_response(
+                    content=("No LFG channels are configured anywhere yet.\n"
+                             "Ask a server admin to run `/lfg_channel set #channel`, then try again.")
+                )
+                return
+
             if posted == 0:
-                await interaction.edit_original_response(
-                    content=(
-                        "Your ad was saved, but no servers accepted the post. "
-                        "Check LFG channel permissions or set up channels with `/lfg_channel set #channel`."
-                    )
-                )
-            else:
-                await interaction.edit_original_response(
-                    content=("✅ Your ad was posted!\n" f"• **Servers posted to:** {posted}")
-                )
-                await db.stats_inc("ads_posted", 1)
+                # Delete the inserted ad so nothing is "saved"
                 try:
-                    now2 = datetime.now(timezone.utc)
-                    await cooldowns_db.set_next_ok_at(
-                        interaction.user.id, now2 + timedelta(seconds=USER_COOLDOWN_SEC), reason="lfg_post"
-                    )
+                    pool = get_pool()
+                    async with pool.acquire() as conn:
+                        await conn.execute("DELETE FROM lfg_ads WHERE id = $1", int(ad_id_inserted))
                 except Exception:
-                    LOGGER.exception("Cooldown write failed")
+                    LOGGER.exception("Failed to delete ad %s after 0 posts", ad_id_inserted)
+
+                await interaction.edit_original_response(
+                    content=("No servers accepted the post (missing channel or permissions). "
+                             "Nothing was saved. Ask an admin to set `/lfg_channel set #channel` "
+                             "and ensure I can Send Messages & Embed Links.")
+                )
+                return
+
+            # Success: at least one server posted
+            await interaction.edit_original_response(
+                content=("✅ Your ad was posted!\n" f"• **Servers posted to:** {posted}")
+            )
+            await db.stats_inc("ads_posted", 1)
+
+            # Set GLOBAL cooldown in DB
+            try:
+                now2 = datetime.now(timezone.utc)
+                await cooldowns_db.set_next_ok_at(
+                    interaction.user.id,
+                    now2 + timedelta(seconds=USER_COOLDOWN_SEC),
+                    reason="lfg_post",
+                )
+            except Exception:
+                LOGGER.exception("Cooldown write failed")
         except (discord.NotFound, discord.HTTPException):
             pass
 
