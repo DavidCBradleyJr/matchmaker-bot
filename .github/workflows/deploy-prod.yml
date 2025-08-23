@@ -26,11 +26,11 @@ jobs:
         run: |
           # Set all secrets needed by the app; triggers a rolling restart
           flyctl secrets set \
-            DISCORD_TOKEN='$DISCORD_TOKEN' \
-            DATABASE_URL='$DATABASE_URL' \
+            DISCORD_TOKEN="$DISCORD_TOKEN" \
+            DATABASE_URL="$DATABASE_URL" \
             ENVIRONMENT=production \
-            PUBLIC_INVITE_URL='${INVITE_URL:-}' \
-            PROD_DATABASE_URL='PROD_DATABASE_URL' \
+            PUBLIC_INVITE_URL="${INVITE_URL:-}" \
+            PROD_DATABASE_URL="PROD_DATABASE_URL" \
             -a matchmaker-prod-bot
 
   deploy:
