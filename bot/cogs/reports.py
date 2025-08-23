@@ -16,6 +16,7 @@ from ..database import reports_db, moderation_db
 LOGGER = logging.getLogger("reports")
 if not LOGGER.handlers:
     import sys
+
     h = logging.StreamHandler(stream=sys.stdout)
     fmt = logging.Formatter("[%(asctime)s] %(levelname)s reports: %(message)s")
     h.setFormatter(fmt)
@@ -32,15 +33,18 @@ MAX_DESC = 120
 REPORT_ID_RE = re.compile(r"Ad\s*Report\s*#\s*(\d+)", re.IGNORECASE)
 BACKTICK_NUM_RE = re.compile(r"\(`?(\d+)`?\)")
 
+
 def _slug_name(name: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower())
     return slug.strip("-")[:24] or "user"
+
 
 def _is_mod(member: discord.Member) -> bool:
     if OWNER_USER_ID and member.id == OWNER_USER_ID:
         return True
     p = member.guild_permissions
     return bool(p.manage_guild or p.manage_channels or p.administrator)
+
 
 def _parse_ctx_from_message(msg: discord.Message | None) -> dict[str, int | None]:
     report_id = reported_id = ad_id = origin_guild_id = None
@@ -73,12 +77,79 @@ def _parse_ctx_from_message(msg: discord.Message | None) -> dict[str, int | None
     except Exception:
         return {"report_id": report_id, "reported_id": reported_id, "ad_id": ad_id, "origin_guild_id": origin_guild_id}
 
-# ---------- Modals ----------
+
+# ---------- Reporter Reply (DM) UI ----------
+
+class ReporterReplyModal(ui.Modal, title="Reply to moderators"):
+    def __init__(self, report_id: int):
+        super().__init__(timeout=180)
+        self.report_id = int(report_id)
+        self.message = ui.TextInput(
+            label="Your reply",
+            placeholder="Type your response for the moderators…",
+            max_length=500,
+            required=True,
+            style=discord.TextStyle.paragraph,
+        )
+        self.add_item(self.message)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        try:
+            link = await reports_db.get_open_conversation_by_reporter(interaction.user.id)
+            if not link or int(link["report_id"]) != self.report_id:
+                await interaction.response.send_message("This conversation isn’t active anymore.", ephemeral=True)
+                return
+
+            channel = interaction.client.get_channel(int(link["channel_id"]))
+            if channel is None:
+                try:
+                    channel = await interaction.client.fetch_channel(int(link["channel_id"]))
+                except Exception:
+                    LOGGER.exception("Cannot fetch report channel %s for reporter reply", link["channel_id"])
+                    await interaction.response.send_message("Couldn’t reach the moderators’ channel.", ephemeral=True)
+                    return
+
+            header = f"**Reply from <@{interaction.user.id}> on report `#{self.report_id}`:**"
+            await channel.send(f"{header}\n{self.message.value}")
+            await interaction.response.send_message("✅ Sent to moderators.", ephemeral=True)
+        except Exception:
+            LOGGER.exception("Failed to relay reporter reply")
+            if interaction.response.is_done():
+                await interaction.followup.send("Something went wrong sending your reply.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Something went wrong sending your reply.", ephemeral=True)
+
+
+class ReporterReplyView(ui.View):
+    """Persistent DM view shown to the reporter; opens the reply modal."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @ui.button(label="Send Reply", style=discord.ButtonStyle.primary, custom_id="reporter:reply")
+    async def open_modal(self, interaction: discord.Interaction, button: ui.Button):
+        try:
+            link = await reports_db.get_open_conversation_by_reporter(interaction.user.id)
+            if not link:
+                await interaction.response.send_message("There’s no active report conversation.", ephemeral=True)
+                return
+            await interaction.response.send_modal(ReporterReplyModal(int(link["report_id"])))
+        except Exception:
+            LOGGER.exception("Failed opening reporter reply modal")
+            if interaction.response.is_done():
+                await interaction.followup.send("Couldn’t open the reply form.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Couldn’t open the reply form.", ephemeral=True)
+
+
+# ---------- Modals for moderators ----------
 
 class AskReporterModal(ui.Modal, title="Ask Reporter for More Info"):
     """
-    Sends a DM to the reporter and (re)opens the DM relay conversation.
+    Sends a DM to the reporter with a button that opens a reply modal.
+    Also (re)opens the DM relay conversation for routing.
     """
+
     def __init__(self, target: discord.User, *, report_id: str | int | None, channel_id: int | None):
         super().__init__(timeout=180)
         self.target = target
@@ -90,29 +161,31 @@ class AskReporterModal(ui.Modal, title="Ask Reporter for More Info"):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         try:
+            # Open/refresh the conversation route first
+            if self.report_id and self.channel_id:
+                try:
+                    await reports_db.open_conversation(int(self.report_id), int(self.target.id), int(self.channel_id))
+                except Exception:
+                    LOGGER.exception("Failed to open report DM conversation bridge")
+
             await self.target.send(
-                f"👋 A moderator has asked for more info about your report"
-                f"{f' **#{self.report_id}**' if self.report_id else ''}:\n> {self.message.value}\n\n"
-                f"Reply to this DM and I’ll forward your messages to the moderators."
+                "👋 A moderator has asked for more info about your report"
+                f"{f' **#{self.report_id}**' if self.report_id else ''}:\n"
+                f"> {self.message.value}\n\n"
+                "Press the button below to send a reply back to the moderators.",
+                view=ReporterReplyView(),
             )
-            try:
-                if self.report_id and self.channel_id:
-                    await reports_db.open_conversation(
-                        int(self.report_id), int(self.target.id), int(self.channel_id)
-                    )
-                    LOGGER.info("DM relay opened: report=%s reporter=%s -> channel=%s",
-                                self.report_id, self.target.id, self.channel_id)
-            except Exception:
-                LOGGER.exception("Failed to open report DM conversation bridge")
             await interaction.response.send_message("✅ DM sent to reporter.", ephemeral=True)
         except Exception:
             LOGGER.exception("DM to reporter failed")
             await interaction.response.send_message("Couldn’t DM the reporter (DMs may be closed).", ephemeral=True)
 
+
 class WarnReportedModal(ui.Modal, title="Warn Reported User"):
     def __init__(self, target: discord.User):
         super().__init__(timeout=180)
-        self.reason = ui.TextInput(label="Reason", max_length=300, required=True, placeholder="Short reason shown in DM")
+        self.reason = ui.TextInput(label="Reason", max_length=300, required=True,
+                                   placeholder="Short reason shown in DM")
         self.target = target
         self.add_item(self.reason)
 
@@ -123,6 +196,7 @@ class WarnReportedModal(ui.Modal, title="Warn Reported User"):
         except Exception:
             LOGGER.exception("DM to reported failed")
             await interaction.response.send_message("Couldn’t DM the user (DMs may be closed).", ephemeral=True)
+
 
 class TimeoutModal(ui.Modal, title="Timeout Reported User"):
     def __init__(self, reported_id: int, origin_guild_id: int | None):
@@ -151,7 +225,8 @@ class TimeoutModal(ui.Modal, title="Timeout Reported User"):
             ctx = _parse_ctx_from_message(interaction.message)
             ctx_gid = ctx["origin_guild_id"] or (interaction.guild.id if interaction.guild else None)
         if not ctx_gid:
-            await interaction.response.send_message("Couldn’t identify the origin server for this report.", ephemeral=True)
+            await interaction.response.send_message("Couldn’t identify the origin server for this report.",
+                                                    ephemeral=True)
             return
 
         try:
@@ -167,9 +242,11 @@ class TimeoutModal(ui.Modal, title="Timeout Reported User"):
             try:
                 if u:
                     if mins > 0:
-                        await u.send(f"⏱ You’ve been timed out from using the bot for **{mins} minutes** in that server.\nReason: {self.reason.value}")
+                        await u.send(
+                            f"⏱ You’ve been timed out from using the bot for **{mins} minutes** in that server.\nReason: {self.reason.value}")
                     else:
-                        await u.send(f"⏱ You’ve been timed out from using the bot **indefinitely** in that server.\nReason: {self.reason.value}")
+                        await u.send(
+                            f"⏱ You’ve been timed out from using the bot **indefinitely** in that server.\nReason: {self.reason.value}")
             except Exception:
                 LOGGER.info("Reported user DM after timeout failed")
 
@@ -192,12 +269,15 @@ class TimeoutModal(ui.Modal, title="Timeout Reported User"):
             else:
                 await interaction.followup.send(base, ephemeral=True)
 
+
 class AdReportModal(ui.Modal, title="Report this ad"):
     """
     Collects the reporter's description and files a new report channel
     in the main bot guild's reports category.
     """
-    def __init__(self, parent: "Reports", *, reporter: discord.User, reported_id: int, ad_id: int, ad_message_id: int, origin_guild_id: int):
+
+    def __init__(self, parent: "Reports", *, reporter: discord.User, reported_id: int, ad_id: int, ad_message_id: int,
+                 origin_guild_id: int):
         super().__init__(timeout=180)
         self.parent = parent
         self.reporter = reporter
@@ -237,7 +317,8 @@ class AdReportModal(ui.Modal, title="Report this ad"):
             )
 
             # Resolve main guild + category
-            main_guild = interaction.client.get_guild(MAIN_BOT_GUILD_ID) or await interaction.client.fetch_guild(MAIN_BOT_GUILD_ID)
+            main_guild = interaction.client.get_guild(MAIN_BOT_GUILD_ID) or await interaction.client.fetch_guild(
+                MAIN_BOT_GUILD_ID)
             category = main_guild.get_channel(REPORTS_CATEGORY_ID)
             if not isinstance(category, discord.CategoryChannel):
                 raise RuntimeError("REPORTS_CATEGORY_ID does not point to a Category in the main bot guild.")
@@ -253,7 +334,8 @@ class AdReportModal(ui.Modal, title="Report this ad"):
             )
 
             # Build embed
-            reported_user = interaction.client.get_user(self.reported_id) or await interaction.client.fetch_user(self.reported_id)
+            reported_user = interaction.client.get_user(self.reported_id) or await interaction.client.fetch_user(
+                self.reported_id)
             reporter_user = self.reporter
 
             embed = discord.Embed(
@@ -262,9 +344,12 @@ class AdReportModal(ui.Modal, title="Report this ad"):
                 color=discord.Color.red(),
             )
             embed.add_field(name="Reporter", value=f"{reporter_user.mention} (`{reporter_user.id}`)", inline=True)
-            embed.add_field(name="Reported", value=f"{reported_user.mention if reported_user else self.reported_id} (`{self.reported_id}`)", inline=True)
+            embed.add_field(name="Reported",
+                            value=f"{reported_user.mention if reported_user else self.reported_id} (`{self.reported_id}`)",
+                            inline=True)
             embed.add_field(name="Ad", value=f"ID: `{self.ad_id}`", inline=True)
-            embed.add_field(name="Reports against user", value=f"{total_reports} total (includes this report)", inline=True)
+            embed.add_field(name="Reports against user", value=f"{total_reports} total (includes this report)",
+                            inline=True)
 
             jump = None
             try:
@@ -275,7 +360,6 @@ class AdReportModal(ui.Modal, title="Report this ad"):
             if jump:
                 embed.add_field(name="Original Message", value=f"[Jump to message]({jump})", inline=False)
 
-            # Ensure moderation schema exists; add the view
             await moderation_db.ensure_user_timeouts_schema()
 
             await channel.send(
@@ -290,7 +374,7 @@ class AdReportModal(ui.Modal, title="Report this ad"):
                 ),
             )
 
-            # Open the DM bridge immediately so replies route back
+            # Open the DM bridge immediately so the Reply button can route
             try:
                 await reports_db.open_conversation(int(report_id), int(reporter_user.id), int(channel.id))
                 LOGGER.info("DM relay opened (post-create): report=%s reporter=%s -> channel=%s",
@@ -306,11 +390,14 @@ class AdReportModal(ui.Modal, title="Report this ad"):
         except Exception:
             LOGGER.exception("Failed to submit ad report")
             if interaction.response.is_done():
-                await interaction.followup.send("Something went wrong while filing your report. Please try again.", ephemeral=True)
+                await interaction.followup.send("Something went wrong while filing your report. Please try again.",
+                                                ephemeral=True)
             else:
-                await interaction.response.send_message("Something went wrong while filing your report. Please try again.", ephemeral=True)
+                await interaction.response.send_message(
+                    "Something went wrong while filing your report. Please try again.", ephemeral=True)
 
-# ---------- View ----------
+
+# ---------- View shown in report channels for moderators ----------
 
 class ReportModerationView(ui.View):
     def __init__(self, *, report_id: int | None, reporter_id: int | None, reported_id: int | None,
@@ -324,7 +411,8 @@ class ReportModerationView(ui.View):
         self.ad_jump = ad_jump
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.guild_id != MAIN_BOT_GUILD_ID or not isinstance(interaction.user, discord.Member) or not _is_mod(interaction.user):
+        if interaction.guild_id != MAIN_BOT_GUILD_ID or not isinstance(interaction.user, discord.Member) or not _is_mod(
+                interaction.user):
             await interaction.response.send_message("You don’t have permission to use these controls.", ephemeral=True)
             return False
         return True
@@ -362,10 +450,11 @@ class ReportModerationView(ui.View):
         target_id = ctx["reported_id"] or self.reported_id
         ogid = ctx["origin_guild_id"] or self.origin_guild_id
         if not target_id:
-            await interaction.response.send_message("Can’t identify the reported user on this message.", ephemeral=True)
+            await interaction.response.send_message("Can’t identify which user to timeout.", ephemeral=True)
             return
         if not ogid:
-            await interaction.response.send_message("Can’t identify which server to apply the timeout to.", ephemeral=True)
+            await interaction.response.send_message("Can’t identify which server to apply the timeout to.",
+                                                    ephemeral=True)
             return
         await interaction.response.send_modal(TimeoutModal(int(target_id), int(ogid)))
 
@@ -438,11 +527,13 @@ class ReportModerationView(ui.View):
 
             await ch.delete(reason=f"Report #{rid or '?'} resolved and deleted by {interaction.user}")
         except Exception:
-            LOGGER.exception("Resolve/delete flow failed (guild=%s ch=%s)", getattr(interaction.guild, "id", "?"), getattr(interaction.channel, "id", "?"))
+            LOGGER.exception("Resolve/delete flow failed (guild=%s ch=%s)", getattr(interaction.guild, "id", "?"),
+                             getattr(interaction.channel, "id", "?"))
             if not interaction.response.is_done():
                 await interaction.response.send_message("Tried to close, but an error occurred.", ephemeral=True)
             else:
                 await interaction.followup.send("Tried to close, but an error occurred.", ephemeral=True)
+
 
 # ---------- Cog ----------
 
@@ -458,10 +549,14 @@ class Reports(commands.Cog):
         except Exception:
             LOGGER.exception("Failed to ensure reports tables on cog load")
         await moderation_db.ensure_user_timeouts_schema()
+
+        # Persistent views
         self.bot.add_view(ReportModerationView(
             report_id=None, reporter_id=None, reported_id=None, ad_id=None, origin_guild_id=None, ad_jump=None
         ))
-        LOGGER.info("Reports cog loaded; DM relay listener active.")
+        self.bot.add_view(ReporterReplyView())  # NEW
+
+        LOGGER.info("Reports cog loaded; reporter DM reply button ready.")
 
     async def open_report_modal(self, interaction: discord.Interaction, *, reported_id: int, ad_id: int) -> None:
         # IMPORTANT: Do NOT defer before calling this; first response must be the modal.
@@ -484,51 +579,6 @@ class Reports(commands.Cog):
             origin_guild_id=origin_guild_id,
         )
         await interaction.response.send_modal(modal)
-
-    # ---------- DM → Report channel relay ----------
-    @commands.Cog.listener()
-    async def on_message(self, message: discord.Message):
-        """
-        Relay reporter DM replies back into the report channel.
-        Requires Message Content Intent to be enabled for DMs.
-        """
-        # Only DMs from humans
-        if message.author.bot or message.guild is not None:
-            return
-        try:
-            link = await reports_db.get_open_conversation_by_reporter(message.author.id)
-            if not link:
-                return  # no open conversation for this reporter
-
-            # Fetch the report channel
-            channel = self.bot.get_channel(int(link["channel_id"]))
-            if channel is None:
-                try:
-                    channel = await self.bot.fetch_channel(int(link["channel_id"]))
-                except Exception:
-                    LOGGER.exception("Cannot fetch report channel %s for DM relay", link["channel_id"])
-                    return
-            if not isinstance(channel, (discord.TextChannel, discord.Thread)):
-                LOGGER.info("Relay target is not a text channel/thread: %s", type(channel))
-                return
-
-            header = f"**Reply from <@{message.author.id}> on report `#{link['report_id']}`:**"
-            parts = [header]
-            if message.content:
-                parts.append(message.content)
-
-            files = []
-            for a in message.attachments:
-                try:
-                    files.append(await a.to_file())
-                except Exception:
-                    LOGGER.exception("Failed to pull DM attachment for relay")
-
-            await channel.send("\n".join(parts), files=files or None)
-            LOGGER.info("DM relayed to channel=%s for report=%s by user=%s",
-                        link["channel_id"], link["report_id"], message.author.id)
-        except Exception:
-            LOGGER.exception("Failed to relay DM reply from %s", message.author.id)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Reports(bot), override=True)
