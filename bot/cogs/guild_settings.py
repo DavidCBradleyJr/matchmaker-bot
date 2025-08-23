@@ -1,7 +1,7 @@
 import discord
 from discord import app_commands
 from discord.ext import commands
-from ..db import get_pool  # keep this import style consistent with your repo
+from ..db import get_pool
 
 class GuildSettings(commands.Cog):
     def __init__(self, bot: commands.Bot):

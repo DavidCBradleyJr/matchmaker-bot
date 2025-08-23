@@ -57,7 +57,7 @@ async def safe_ack(
             return True
         else:
             if message:
-                await interaction.response.send_message(message, ephemeral=ephemeral)
+                await interaction.response.send_message(message, ephemeral=True)
             else:
                 await interaction.response.defer(ephemeral=ephemeral, thinking=use_thinking)
             return True
@@ -74,6 +74,36 @@ def _err_code(prefix: str, exc: BaseException | None = None) -> str:
         return ""
     typ = type(exc).__name__ if exc else ""
     return f" ({prefix}:{typ})" if typ else f" ({prefix})"
+
+
+def _refund_cooldown(interaction: discord.Interaction) -> None:
+    """Refund the app_commands cooldown if the command failed to actually post."""
+    try:
+        cmd = getattr(interaction, "command", None)
+        if cmd and hasattr(cmd, "reset_cooldown"):
+            cmd.reset_cooldown(interaction)
+    except Exception:
+        LOGGER.info("Cooldown refund failed", exc_info=True)
+
+
+def _format_missing(perms: list[str]) -> str:
+    return ", ".join(f"`{p}`" for p in perms)
+
+
+def _check_channel_perms(guild: discord.Guild, channel: discord.abc.GuildChannel) -> list[str]:
+    """Return a list of missing perms the bot needs in this channel."""
+    me = guild.me
+    if me is None:
+        return ["bot member not resolved"]
+    p = channel.permissions_for(me)
+    missing = []
+    if not p.view_channel:
+        missing.append("view_channel")
+    if not p.send_messages:
+        missing.append("send_messages")
+    if not p.embed_links:
+        missing.append("embed_links")
+    return missing
 
 # ---------------------
 # Button View
@@ -249,7 +279,7 @@ class LfgAds(commands.Cog):
             if pool is None:
                 raise RuntimeError("DB pool is not initialized; check DATABASE_URL and pool init in main().")
 
-            # 1) Insert the ad in the DB (author+content)
+            # 1) Insert the ad in the DB
             try:
                 async with pool.acquire() as conn:
                     ad_id = await conn.fetchval(
@@ -290,6 +320,7 @@ class LfgAds(commands.Cog):
                     text=f"Posted by {interaction.user} • Ad #{ad_id} • Powered by Matchmaker",
                     icon_url="https://i.imgur.com/4x9pIr0.png"
                 )
+                view = ConnectButton(ad_id=ad_id)
             except Exception as exc:
                 LOGGER.error("Building embed failed:\n%s", traceback.format_exc())
                 raise RuntimeError("EMBED_BUILD") from exc
@@ -314,21 +345,32 @@ class LfgAds(commands.Cog):
                 if not isinstance(channel, discord.TextChannel):
                     raise RuntimeError("NO_LFG_CHANNEL_SET")
 
-                # 4) Post in the resolved channel
-                await asyncio.wait_for(channel.send(embed=embed, view=ConnectButton(ad_id=ad_id)), timeout=PER_SEND_TIMEOUT)
+                # 4) Permissions check BEFORE trying to send
+                missing = _check_channel_perms(interaction.guild, channel)
+                if missing:
+                    raise RuntimeError("MISSING_CHANNEL_PERMS:" + ",".join(missing))
+
+                # 5) Post in the resolved channel
+                try:
+                    await asyncio.wait_for(channel.send(embed=embed, view=view), timeout=PER_SEND_TIMEOUT)
+                except discord.Forbidden as exc:
+                    # Convert to a clear, actionable runtime error
+                    raise RuntimeError("MISSING_CHANNEL_PERMS:send_messages,embed_links?") from exc
+
                 return 1
 
             except Exception as exc:
-                if isinstance(exc, RuntimeError) and str(exc) == "NO_LFG_CHANNEL_SET":
-                    # Clear message for user; handled by caller
+                if isinstance(exc, RuntimeError) and str(exc) in {"NO_LFG_CHANNEL_SET"} or str(exc).startswith("MISSING_CHANNEL_PERMS:"):
                     raise
                 LOGGER.error("Posting to guild channel failed:\n%s", traceback.format_exc())
                 raise RuntimeError("POST_SEND") from exc
 
+        # Run and handle outcomes
         try:
             posted = await asyncio.wait_for(do_post_work(), timeout=POST_TIMEOUT_SECONDS)
         except RuntimeError as exc:
-            if str(exc) == "NO_LFG_CHANNEL_SET":
+            msg = str(exc)
+            if msg == "NO_LFG_CHANNEL_SET":
                 try:
                     await interaction.edit_original_response(
                         content=(
@@ -338,14 +380,35 @@ class LfgAds(commands.Cog):
                     )
                 except Exception:
                     pass
+                _refund_cooldown(interaction)
                 return
+
+            if msg.startswith("MISSING_CHANNEL_PERMS:"):
+                missing = msg.split(":", 1)[1] or "unknown"
+                try:
+                    await interaction.edit_original_response(
+                        content=(
+                            f"❌ I don’t have enough permissions in the configured LFG channel.\n"
+                            f"Missing: {_format_missing(missing.split(','))}\n"
+                            f"Ask an admin to grant me those in the channel’s Permissions, or pick another channel with "
+                            f"`/lfg_channel set #channel`.\n\n"
+                            f"Tip: both **Prod** and **Staging** bots need permissions if both will post."
+                        )
+                    )
+                except Exception:
+                    pass
+                _refund_cooldown(interaction)
+                return
+
             try:
                 await interaction.edit_original_response(
                     content="Something went wrong while posting your ad. Please try again." + _err_code("POST", exc)
                 )
             except Exception:
                 pass
+            _refund_cooldown(interaction)
             return
+
         except asyncio.TimeoutError:
             LOGGER.warning("post() timed out after %ss", POST_TIMEOUT_SECONDS)
             try:
@@ -354,6 +417,7 @@ class LfgAds(commands.Cog):
                 )
             except Exception:
                 pass
+            _refund_cooldown(interaction)
             return
         except Exception as exc:
             try:
@@ -362,6 +426,7 @@ class LfgAds(commands.Cog):
                 )
             except Exception:
                 pass
+            _refund_cooldown(interaction)
             return
 
         try:
@@ -372,6 +437,7 @@ class LfgAds(commands.Cog):
                         "Ask server owners to run `/lfg_channel set #channel`."
                     )
                 )
+                _refund_cooldown(interaction)  # Nothing was posted; don't burn the user's cooldown
             else:
                 await interaction.edit_original_response(
                     content="✅ Your ad was posted in this server’s LFG channel."
