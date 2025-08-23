@@ -10,7 +10,7 @@ import discord
 from discord import ui
 from discord.ext import commands
 
-from .database import reports_db, moderation_db
+from ..database import reports_db, moderation_db
 
 LOGGER = logging.getLogger("reports")
 if not LOGGER.handlers:
