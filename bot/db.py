@@ -23,16 +23,26 @@ def _resolve_dsn_from_env() -> str | None:
     """
     Prefer STAGING_DATABASE_URL when ENV starts with 'stag', else PROD_DATABASE_URL.
     Fallback to the other if the preferred one is missing.
+    Empty strings are treated as missing.
     """
+    def _clean(v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        return v if v else None
+
     if ENV.startswith("stag"):
-        return os.getenv("STAGING_DATABASE_URL") or os.getenv("PROD_DATABASE_URL")
-    return os.getenv("PROD_DATABASE_URL") or os.getenv("STAGING_DATABASE_URL")
+        return _clean(os.getenv("STAGING_DATABASE_URL")) or _clean(os.getenv("PROD_DATABASE_URL"))
+    return _clean(os.getenv("PROD_DATABASE_URL")) or _clean(os.getenv("STAGING_DATABASE_URL"))
 
 async def init_pool_from_env() -> None:
     """Optional convenience: initialize pool using ENV + Neon URLs."""
     dsn = _resolve_dsn_from_env()
     if not dsn:
-        raise RuntimeError("No STAGING_DATABASE_URL or PROD_DATABASE_URL set")
+        raise RuntimeError(
+            f"No usable DSN found for ENV='{ENV}'. "
+            f"Set PROD_DATABASE_URL (production) or STAGING_DATABASE_URL (staging)."
+        )
     await init_pool(dsn)
 
 CREATE_STATS_SQL = """
@@ -98,7 +108,6 @@ async def remove_allowed_guilds(environment: str, guild_ids: Iterable[int]) -> i
             list(map(int, guild_ids)),
         )
         return int(result.split()[-1])
-
 
 async def stats_add_guild(guild_id: int) -> None:
     pool = _require_pool()
