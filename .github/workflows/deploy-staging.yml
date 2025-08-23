@@ -25,10 +25,10 @@ jobs:
         run: |
           flyctl secrets set \
             DISCORD_TOKEN="$DISCORD_TOKEN" \
-            DATABASE_URL="$DATABASE_URL" \
+#            DATABASE_URL="$DATABASE_URL" \
             ENVIRONMENT=staging \
             PUBLIC_INVITE_URL="${INVITE_URL:-}" \
-            STAGING_DATABASE_URL="$STAGING_DATABASE_URL" \
+#            STAGING_DATABASE_URL="$STAGING_DATABASE_URL" \
             -a matchmaker-staging-bot
 
   deploy:
