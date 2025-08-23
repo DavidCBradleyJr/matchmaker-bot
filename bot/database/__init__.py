@@ -1,0 +1,1 @@
+# makes 'bot.database' a package so relative imports work
