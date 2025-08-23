@@ -23,7 +23,7 @@ LOGGER.setLevel(logging.INFO)
 # ---------- Config / Guards ----------
 MAIN_BOT_GUILD_ID = int(os.getenv("MAIN_BOT_GUILD_ID", "0"))
 REPORTS_CATEGORY_ID = int(os.getenv("REPORTS_CATEGORY_ID", "0"))
-OWNER_USER_ID = int(os.getenv("OWNER_USER_ID", "0"))
+OWNER_USER_ID = int(os.getenv("OWNER_ID", "0"))
 MAX_DESC = 120
 
 # ---------- Helpers ----------
@@ -41,9 +41,9 @@ def _is_mod(member: discord.Member) -> bool:
     return bool(p.manage_guild or p.manage_channels or p.administrator)
 
 def _parse_ctx_from_message(msg: discord.Message | None) -> dict[str, int | None]:
-    report_id = reported_id = ad_id = origin_guild_id = None
+    report_id = reported_id = reporter_id = ad_id = origin_guild_id = None
     if not msg:
-        return {"report_id": None, "reported_id": None, "ad_id": None, "origin_guild_id": None}
+        return {"report_id": None, "reported_id": None, "reporter_id": None, "ad_id": None, "origin_guild_id": None}
     try:
         if isinstance(msg.channel, discord.TextChannel):
             m = re.search(r"report-(\d+)-", msg.channel.name)
@@ -59,17 +59,34 @@ def _parse_ctx_from_message(msg: discord.Message | None) -> dict[str, int | None
                 if m:
                     report_id = report_id or int(m.group(1))
             for f in emb.fields:
-                if f.name and f.name.lower() == "ad":
+                name = (f.name or "").strip().lower()
+                if name == "ad":
                     m = re.search(r"`(\d+)`", str(f.value))
                     if m:
                         ad_id = int(m.group(1))
-                if f.name and f.name.lower() == "reported":
+                elif name == "reported":
                     m = BACKTICK_NUM_RE.search(str(f.value))
                     if m:
                         reported_id = int(m.group(1))
-        return {"report_id": report_id, "reported_id": reported_id, "ad_id": ad_id, "origin_guild_id": origin_guild_id}
+                elif name == "reporter":
+                    m = BACKTICK_NUM_RE.search(str(f.value))
+                    if m:
+                        reporter_id = int(m.group(1))
+        return {
+            "report_id": report_id,
+            "reported_id": reported_id,
+            "reporter_id": reporter_id,
+            "ad_id": ad_id,
+            "origin_guild_id": origin_guild_id,
+        }
     except Exception:
-        return {"report_id": report_id, "reported_id": reported_id, "ad_id": ad_id, "origin_guild_id": origin_guild_id}
+        return {
+            "report_id": report_id,
+            "reported_id": reported_id,
+            "reporter_id": reporter_id,
+            "ad_id": ad_id,
+            "origin_guild_id": origin_guild_id,
+        }
 
 # ---------- Reporter Reply (DM) UI ----------
 
@@ -150,7 +167,6 @@ class AskReporterModal(ui.Modal, title="Ask Reporter for More Info"):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         try:
-            # Open/refresh the conversation route first
             if self.report_id and self.channel_id:
                 try:
                     await reports_db.open_conversation(int(self.report_id), int(self.target.id), int(self.channel_id))
@@ -392,11 +408,20 @@ class ReportModerationView(ui.View):
     async def ask_reporter(self, interaction: discord.Interaction, button: ui.Button):
         ctx = _parse_ctx_from_message(interaction.message)
         rid = ctx["report_id"] or self.report_id
-        ch_id = interaction.channel_id
-        if not self.reporter_id:
+
+        reporter_id = self.reporter_id or ctx.get("reporter_id")
+        if not reporter_id and rid:
+            try:
+                reporter_id = await reports_db.get_reporter_id(int(rid))
+            except Exception:
+                LOGGER.exception("Reporter lookup failed for report=%s", rid)
+
+        if not reporter_id:
             await interaction.response.send_message("Missing reporter context.", ephemeral=True)
             return
-        user = interaction.client.get_user(self.reporter_id) or await interaction.client.fetch_user(self.reporter_id)
+
+        ch_id = interaction.channel_id
+        user = interaction.client.get_user(int(reporter_id)) or await interaction.client.fetch_user(int(reporter_id))
         if not user:
             await interaction.response.send_message("Reporter not found.", ephemeral=True)
             return
@@ -466,14 +491,12 @@ class ReportModerationView(ui.View):
         ctx = _parse_ctx_from_message(interaction.message)
         rid = ctx["report_id"] or self.report_id
 
-        # Mark closed in DB (best-effort)
         try:
             if rid:
                 await reports_db.close_report(int(rid), closed_by=interaction.user.id)
         except Exception:
             LOGGER.exception("Failed to mark report closed in DB")
 
-        # Delete the channel (no archiving)
         try:
             ch = interaction.channel
             if not isinstance(ch, discord.TextChannel):
@@ -535,7 +558,6 @@ class Reports(commands.Cog):
         self._register_persistent_views()
 
     async def open_report_modal(self, interaction: discord.Interaction, *, reported_id: int, ad_id: int) -> None:
-        # IMPORTANT: Do NOT defer before calling this; first response must be the modal.
         if not MAIN_BOT_GUILD_ID or not REPORTS_CATEGORY_ID:
             await interaction.response.send_message(
                 "Reporting isn’t configured yet. (Missing MAIN_BOT_GUILD_ID / REPORTS_CATEGORY_ID)",
