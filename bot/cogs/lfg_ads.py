@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import traceback
+from datetime import datetime, timezone
 
 import discord
 from discord import app_commands, ui
@@ -12,6 +13,7 @@ from discord.ext import commands
 from ..db import get_pool
 import bot.db as db
 from ..ui.dm_styles import send_pretty_interest_dm
+from ..database import moderation_db
 
 # ---------------------
 # Logging
@@ -104,6 +106,16 @@ def _check_channel_perms(guild: discord.Guild, channel: discord.abc.GuildChannel
         missing.append("embed_links")
     return missing
 
+
+def _rel(ts: datetime | None) -> str:
+    """Discord relative timestamp like 'in 5 minutes'."""
+    if not ts:
+        return ""
+    try:
+        return f"<t:{int(ts.replace(tzinfo=timezone.utc).timestamp())}:R>"
+    except Exception:
+        return ts.isoformat()
+
 # ---------------------
 # Button View
 # ---------------------
@@ -118,6 +130,20 @@ class ConnectButton(ui.View):
         acked = await safe_ack(interaction, message=None, ephemeral=True, use_thinking=False)
         sent_followup = False
         try:
+            # Timeout gate for connectors
+            try:
+                if interaction.guild and await moderation_db.is_user_timed_out(interaction.guild.id, interaction.user.id):
+                    until = await moderation_db.get_timeout_until(interaction.guild.id, interaction.user.id)
+                    if acked:
+                        await interaction.followup.send(
+                            f"You’re timed out from using the bot. Try again {_rel(until)}." if until else
+                            "You’re timed out from using the bot.",
+                            ephemeral=True,
+                        )
+                    return
+            except Exception:
+                LOGGER.exception("Timeout check failed in ConnectButton.connect; allowing")
+
             user = interaction.user
             pool = get_pool()
             if pool is None:
@@ -269,6 +295,18 @@ class LfgAds(commands.Cog):
         region: str | None = None,
         notes: str | None = None,
     ):
+        try:
+            if await moderation_db.is_user_timed_out(interaction.guild.id, interaction.user.id):
+                until = await moderation_db.get_timeout_until(interaction.guild.id, interaction.user.id)
+                msg = "You’re currently timed out from using this command."
+                if until:
+                    msg += f" Try again {_rel(until)}."
+                await interaction.response.send_message(msg, ephemeral=True)
+                _refund_cooldown(interaction)
+                return
+        except Exception:
+            LOGGER.exception("Timeout check failed in /lfg_ad post; allowing command to proceed")
+
         acked = await safe_ack(interaction, message="Posting your ad…", ephemeral=True, use_thinking=False)
         if not acked:
             return

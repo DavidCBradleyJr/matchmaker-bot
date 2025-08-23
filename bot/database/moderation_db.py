@@ -18,6 +18,9 @@ async def ensure_user_timeouts_schema() -> None:
     Safe to call repeatedly (idempotent).
     """
     pool = get_pool()
+    if pool is None:
+        raise RuntimeError("DB pool is not initialized; check DATABASE_URL and pool init in main().")
+
     async with pool.acquire() as conn:
         # Create table if missing (with PK on (guild_id, user_id))
         await conn.execute(
@@ -53,9 +56,13 @@ async def add_timeout(
     - If a row exists, overwrite until/reason/created_by.
     - If not, insert a new row.
 
-    Mirrors the UPSERT style used in db.py (ON CONFLICT DO UPDATE).
+    Mirrors the UPSERT style used elsewhere in db.py (ON CONFLICT DO UPDATE).
     """
     pool = get_pool()
+    if pool is None:
+        raise RuntimeError("DB pool is not initialized; check DATABASE_URL and pool init in main().")
+
+    # Ensure schema, then write
     await ensure_user_timeouts_schema()
 
     async with pool.acquire() as conn:
@@ -98,6 +105,9 @@ async def add_timeout(
 async def clear_timeout(guild_id: int, user_id: int) -> None:
     """Delete a timeout row if it exists."""
     pool = get_pool()
+    if pool is None:
+        raise RuntimeError("DB pool is not initialized; check DATABASE_URL and pool init in main().")
+
     async with pool.acquire() as conn:
         try:
             await conn.execute(
@@ -118,6 +128,9 @@ async def get_timeout_until(guild_id: int, user_id: int) -> Optional[datetime]:
     else None.
     """
     pool = get_pool()
+    if pool is None:
+        raise RuntimeError("DB pool is not initialized; check DATABASE_URL and pool init in main().")
+
     async with pool.acquire() as conn:
         try:
             row = await conn.fetchrow(
@@ -132,7 +145,7 @@ async def get_timeout_until(guild_id: int, user_id: int) -> Optional[datetime]:
 
 async def is_user_timed_out(guild_id: int, user_id: int, *, now: Optional[datetime] = None) -> bool:
     """
-    Convenience: True if the user has a timeout row with until > now.
+    True if the user has a timeout with until > now.
     """
     now = now or datetime.now(timezone.utc)
     until = await get_timeout_until(int(guild_id), int(user_id))

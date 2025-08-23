@@ -81,6 +81,7 @@ class TimeoutModal(ui.Modal, title="Timeout Reported User"):
         self.add_item(self.reason)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        # Parse minutes (safe default = 0 => indefinite)
         try:
             mins = max(0, int(str(self.minutes.value).strip()))
         except ValueError:
@@ -95,6 +96,7 @@ class TimeoutModal(ui.Modal, title="Timeout Reported User"):
             now = datetime.now(timezone.utc)
             until = now + (timedelta(minutes=mins) if mins > 0 else timedelta(days=36500))  # ~100 years
 
+            # Store timeout (UPSERT)
             await moderation_db.add_timeout(
                 interaction.guild.id,             # guild_id
                 self.reported_id,                 # user_id
@@ -127,7 +129,17 @@ class TimeoutModal(ui.Modal, title="Timeout Reported User"):
 
         except Exception:
             LOGGER.exception("Timeout DB write failed")
-            await interaction.response.send_message("Failed to store timeout. Try again.", ephemeral=True)
+            # Give a slightly more actionable error to mods
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "Failed to store timeout. Try again. If this keeps happening, re-run the command after checking the app's DATABASE_URL and DB perms.",
+                    ephemeral=True
+                )
+            else:
+                await interaction.followup.send(
+                    "Failed to store timeout. Try again. If this keeps happening, re-run the command after checking the app's DATABASE_URL and DB perms.",
+                    ephemeral=True
+                )
 
 class ReportModerationView(ui.View):
     def __init__(self, *, report_id: int, reporter_id: int, reported_id: int, ad_id: int, origin_guild_id: int, ad_jump: str | None):
