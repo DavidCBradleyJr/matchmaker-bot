@@ -175,6 +175,44 @@ class ConnectButton(ui.View):
                 except Exception:
                     pass
 
+    @ui.button(label="Report", style=discord.ButtonStyle.danger, custom_id="lfg:report")
+    async def report(self, interaction: discord.Interaction, button: ui.Button):
+        """Open a modal to report this ad; routes to main bot guild Reports category."""
+        try:
+            pool = get_pool()
+            if pool is None:
+                raise RuntimeError("DB pool is not initialized; check DATABASE_URL and pool init in main().")
+            async with pool.acquire() as conn:
+                ad_row = await conn.fetchrow(
+                    "SELECT id, author_id FROM lfg_ads WHERE id = $1",
+                    int(self.ad_id),
+                )
+            if not ad_row:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("This ad no longer exists.", ephemeral=True)
+                else:
+                    await interaction.followup.send("This ad no longer exists.", ephemeral=True)
+                return
+
+            reported_id = int(ad_row["author_id"])
+
+            reports_cog = interaction.client.get_cog("Reports")
+            if not reports_cog or not hasattr(reports_cog, "open_report_modal"):
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("Reporting isn’t available right now. Try again later.", ephemeral=True)
+                else:
+                    await interaction.followup.send("Reporting isn’t available right now. Try again later.", ephemeral=True)
+                return
+
+            await reports_cog.open_report_modal(interaction, reported_id=reported_id, ad_id=int(self.ad_id))
+
+        except Exception:
+            LOGGER.exception("Failed to open report modal")
+            if interaction.response.is_done():
+                await interaction.followup.send("Something went wrong while opening the report form.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Something went wrong while opening the report form.", ephemeral=True)
+
 # ---------------------
 # Cog + Commands
 # ---------------------
