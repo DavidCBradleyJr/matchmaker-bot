@@ -14,6 +14,7 @@ from ..db import get_pool
 
 log = logging.getLogger(__name__)
 
+TABLE_FQN = "public.user_timeouts"  # schema-qualify to avoid search_path surprises
 
 # ---------- Schema management (self-healing, DDL-optional) ----------
 
@@ -32,8 +33,8 @@ async def ensure_user_timeouts_schema() -> None:
         # Try to create table (if we have DDL privileges)
         try:
             await conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS user_timeouts (
+                f"""
+                CREATE TABLE IF NOT EXISTS {TABLE_FQN} (
                     guild_id   BIGINT NOT NULL,
                     user_id    BIGINT NOT NULL,
                     until      TIMESTAMPTZ NOT NULL,
@@ -45,17 +46,17 @@ async def ensure_user_timeouts_schema() -> None:
                 """
             )
         except InsufficientPrivilegeError:
-            log.warning("No DDL privilege to CREATE user_timeouts; will still attempt ALTER checks.")
+            log.warning("No DDL privilege to CREATE %s; will still attempt ALTER checks.", TABLE_FQN)
 
         # Try to add columns if missing (best-effort)
         for stmt in (
-            "ALTER TABLE user_timeouts ADD COLUMN IF NOT EXISTS reason TEXT",
-            "ALTER TABLE user_timeouts ADD COLUMN IF NOT EXISTS created_by BIGINT",
+            f"ALTER TABLE {TABLE_FQN} ADD COLUMN IF NOT EXISTS reason TEXT",
+            f"ALTER TABLE {TABLE_FQN} ADD COLUMN IF NOT EXISTS created_by BIGINT",
         ):
             try:
                 await conn.execute(stmt)
             except InsufficientPrivilegeError:
-                log.warning("No DDL privilege to ALTER user_timeouts; column ensure skipped.")
+                log.warning("No DDL privilege to ALTER %s; column ensure skipped.", TABLE_FQN)
 
 
 # ---------- Writes ----------
@@ -83,8 +84,8 @@ async def add_timeout(
     await ensure_user_timeouts_schema()
 
     async with pool.acquire() as conn:
-        UPSERT = """
-            INSERT INTO user_timeouts (guild_id, user_id, until, reason, created_by)
+        UPSERT = f"""
+            INSERT INTO {TABLE_FQN} (guild_id, user_id, until, reason, created_by)
             VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (guild_id, user_id) DO UPDATE
             SET until = EXCLUDED.until,
@@ -112,9 +113,17 @@ async def add_timeout(
                     reason,
                     created_by,
                 )
-            except (UndefinedTableError, UndefinedColumnError, InsufficientPrivilegeError) as exc:
-                # Bubble a clear, actionable error
-                raise RuntimeError("MISSING_USER_TIMEOUTS_SCHEMA_OR_DDL_PRIVS") from exc
+            except (UndefinedTableError, UndefinedColumnError, InsufficientPrivilegeError):
+                # Double-check if the table actually exists in 'public'
+                exists = await conn.fetchval(
+                    """
+                    SELECT 1 FROM information_schema.tables
+                    WHERE table_schema='public' AND table_name='user_timeouts'
+                    """
+                )
+                if not exists:
+                    raise RuntimeError("USER_TIMEOUTS_TABLE_MISSING")
+                raise RuntimeError("MISSING_USER_TIMEOUTS_SCHEMA_OR_DDL_PRIVS")
         except InsufficientPrivilegeError as exc:
             # INSERT itself failed because of privileges
             raise RuntimeError("DB_WRITE_INSUFFICIENT_PRIVILEGE") from exc
@@ -132,7 +141,7 @@ async def clear_timeout(guild_id: int, user_id: int) -> None:
     async with pool.acquire() as conn:
         try:
             await conn.execute(
-                "DELETE FROM user_timeouts WHERE guild_id=$1 AND user_id=$2",
+                f"DELETE FROM {TABLE_FQN} WHERE guild_id=$1 AND user_id=$2",
                 int(guild_id),
                 int(user_id),
             )
@@ -155,7 +164,7 @@ async def get_timeout_until(guild_id: int, user_id: int) -> Optional[datetime]:
     async with pool.acquire() as conn:
         try:
             row = await conn.fetchrow(
-                "SELECT until FROM user_timeouts WHERE guild_id=$1 AND user_id=$2",
+                f"SELECT until FROM {TABLE_FQN} WHERE guild_id=$1 AND user_id=$2",
                 int(guild_id),
                 int(user_id),
             )

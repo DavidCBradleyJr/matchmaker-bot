@@ -38,10 +38,6 @@ def _is_mod(member: discord.Member) -> bool:
     return bool(p.manage_guild or p.manage_channels or p.administrator)
 
 def _parse_ctx_from_message(msg: discord.Message | None) -> dict[str, int | None]:
-    """
-    Try to recover report context from the message/channel so buttons work after restarts.
-    Returns keys: report_id, reported_id, ad_id, origin_guild_id (values or None).
-    """
     report_id = reported_id = ad_id = origin_guild_id = None
     if not msg:
         return {"report_id": None, "reported_id": None, "ad_id": None, "origin_guild_id": None}
@@ -119,7 +115,6 @@ class TimeoutModal(ui.Modal, title="Timeout Reported User"):
         self.add_item(self.reason)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        # Parse minutes (safe default = 0 => indefinite)
         try:
             mins = max(0, int(str(self.minutes.value).strip()))
         except ValueError:
@@ -127,23 +122,19 @@ class TimeoutModal(ui.Modal, title="Timeout Reported User"):
             return
 
         try:
-            # Ensure schema exists (self-healing; safe to call repeatedly)
             await moderation_db.ensure_user_timeouts_schema()
 
-            # Convert minutes -> concrete until time (UTC).
             now = datetime.now(timezone.utc)
-            until = now + (timedelta(minutes=mins) if mins > 0 else timedelta(days=36500))  # ~100 years
+            until = now + (timedelta(minutes=mins) if mins > 0 else timedelta(days=36500))
 
-            # Store timeout (UPSERT)
             await moderation_db.add_timeout(
-                interaction.guild.id,             # guild_id
-                self.reported_id,                 # user_id
-                until,                            # until (datetime)
-                created_by=interaction.user.id,   # moderator id
+                interaction.guild.id,
+                self.reported_id,
+                until,
+                created_by=interaction.user.id,
                 reason=str(self.reason.value).strip(),
             )
 
-            # Try to DM the user; ignore failures
             u = interaction.client.get_user(self.reported_id) or await interaction.client.fetch_user(self.reported_id)
             try:
                 if u:
@@ -156,7 +147,6 @@ class TimeoutModal(ui.Modal, title="Timeout Reported User"):
 
             await interaction.response.send_message("✅ Timeout recorded.", ephemeral=True)
 
-            # Echo in the mod thread/channel
             try:
                 if isinstance(interaction.channel, discord.TextChannel):
                     await interaction.channel.send(
@@ -195,10 +185,8 @@ class ReportModerationView(ui.View):
 
     @ui.button(label="Ask Reporter", style=discord.ButtonStyle.secondary, custom_id="report:ask_reporter")
     async def ask_reporter(self, interaction: discord.Interaction, button: ui.Button):
-        ctx = _parse_ctx_from_message(interaction.message)
         reporter_user = interaction.client.get_user(self.reporter_id or 0) if self.reporter_id else None
         if not reporter_user:
-            # we don't currently show reporter id in embed; just inform
             await interaction.response.send_message("Reporter not cached; try again later.", ephemeral=True)
             return
         await interaction.response.send_modal(AskReporterModal(reporter_user))
@@ -238,19 +226,43 @@ class ReportModerationView(ui.View):
         try:
             channel = interaction.channel
             if isinstance(channel, discord.TextChannel):
+                # Rename if needed
                 name = channel.name
                 if not name.startswith("resolved-"):
                     await channel.edit(name=f"resolved-{name}", reason=f"Report #{rid or '?'} resolved")
+
+                # Lock the channel by denying send-like perms
                 ow = channel.overwrites
-                ow[channel.guild.default_role] = discord.PermissionOverwrite(send_messages=False)
+
+                def _deny_send_like(po: discord.PermissionOverwrite) -> discord.PermissionOverwrite:
+                    po.send_messages = False
+                    po.send_messages_in_threads = False
+                    po.create_public_threads = False
+                    po.create_private_threads = False
+                    return po
+
+                # @everyone
+                po = ow.get(channel.guild.default_role, discord.PermissionOverwrite())
+                ow[channel.guild.default_role] = _deny_send_like(po)
+
+                # Any role with an overwrite — ensure sends are denied
+                for target, po in list(ow.items()):
+                    if isinstance(target, discord.Role):
+                        po = po or discord.PermissionOverwrite()
+                        if po.send_messages is True or po.send_messages is None:
+                            ow[target] = _deny_send_like(po)
+
                 await channel.edit(overwrites=ow, reason=f"Report #{rid or '?'} closed")
-            # respond to clicker
+
+            # Respond to clicker
             await interaction.response.send_message("✅ Report closed and channel locked.", ephemeral=True)
-            # notify the room (best-effort)
+
+            # Notify the room (best-effort)
             try:
                 await channel.send(f"🟢 **Resolved by** {interaction.user.mention} — report #{rid or '?'}")
             except Exception:
                 pass
+
         except Exception:
             LOGGER.exception("Failed to lock/rename channel on resolve")
             if not interaction.response.is_done():
@@ -280,7 +292,6 @@ class AdReportModal(ui.Modal, title="Report this ad"):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         desc = str(self.description.value).strip()
         try:
-            # Insert + get snapshot count
             report_id, total_reports = await reports_db.insert_report(
                 origin_guild_id=self.origin_guild_id,
                 reporter_id=int(self.reporter.id),
@@ -290,7 +301,6 @@ class AdReportModal(ui.Modal, title="Report this ad"):
                 description=desc,
             )
 
-            # Locate main guild/category
             main_guild = interaction.client.get_guild(MAIN_BOT_GUILD_ID)
             if not main_guild:
                 main_guild = await interaction.client.fetch_guild(MAIN_BOT_GUILD_ID)
@@ -331,7 +341,6 @@ class AdReportModal(ui.Modal, title="Report this ad"):
             if jump:
                 embed.add_field(name="Original Message", value=f"[Jump to message]({jump})", inline=False)
 
-            # Ensure tables exist before using moderation view
             await reports_db.create_reports_table()
             await moderation_db.ensure_user_timeouts_schema()
 
@@ -366,7 +375,7 @@ class Reports(commands.Cog):
     async def cog_load(self) -> None:
         await reports_db.create_reports_table()
         await moderation_db.ensure_user_timeouts_schema()
-        # Register a persistent stateless handler so buttons on old messages work after restarts.
+        # persistent handler so old messages keep working
         self.bot.add_view(ReportModerationView(
             report_id=None, reporter_id=None, reported_id=None, ad_id=None, origin_guild_id=None, ad_jump=None
         ))
