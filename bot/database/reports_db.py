@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from ..db import get_pool
 
+# ---------------------- Reports Table ----------------------
+
 async def create_reports_table() -> None:
     """Create/upgrade the reports table (idempotent)."""
     pool = get_pool()
@@ -17,21 +19,30 @@ async def create_reports_table() -> None:
             ad_id BIGINT NOT NULL,
             ad_message_id BIGINT NOT NULL,
             description TEXT NOT NULL,
-            created_at TIMESTAMPTZ DEFAULT NOW()
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            status TEXT DEFAULT 'open',
+            closed_by BIGINT,
+            closed_at TIMESTAMPTZ,
+            reported_count_at_creation INT
         )
-        """)
-        # Forward-safe additions
-        await conn.execute("""ALTER TABLE reports
-          ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'open',
-          ADD COLUMN IF NOT EXISTS closed_by BIGINT,
-          ADD COLUMN IF NOT EXISTS closed_at TIMESTAMPTZ,
-          ADD COLUMN IF NOT EXISTS reported_count_at_creation INT
         """)
         # Helpful index for history lookups
         await conn.execute(
             "CREATE INDEX IF NOT EXISTS reports_reported_created_idx "
             "ON reports (reported_id, created_at DESC)"
         )
+        # Conversation bridge table
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS report_conversations (
+            report_id    INT PRIMARY KEY REFERENCES reports(id) ON DELETE CASCADE,
+            reporter_id  BIGINT NOT NULL,
+            channel_id   BIGINT NOT NULL,
+            is_open      BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_report_conversations_reporter
+            ON report_conversations (reporter_id) WHERE is_open = TRUE;
+        """)
 
 async def insert_report(
     *,
@@ -117,3 +128,49 @@ async def fetch_recent_reports_by_reported(reported_id: int, limit: int = 10):
             int(reported_id), int(limit),
         )
         return rows
+
+# ------------------ DM conversation bridge --------------------
+
+async def open_conversation(report_id: int, reporter_id: int, channel_id: int) -> None:
+    pool = get_pool()
+    if pool is None:
+        raise RuntimeError("DB pool is not initialized.")
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO report_conversations (report_id, reporter_id, channel_id, is_open)
+            VALUES ($1, $2, $3, TRUE)
+            ON CONFLICT (report_id)
+            DO UPDATE SET reporter_id = EXCLUDED.reporter_id,
+                          channel_id = EXCLUDED.channel_id,
+                          is_open    = TRUE;
+            """,
+            int(report_id), int(reporter_id), int(channel_id)
+        )
+
+async def get_open_conversation_by_reporter(reporter_id: int):
+    pool = get_pool()
+    if pool is None:
+        raise RuntimeError("DB pool is not initialized.")
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT report_id, reporter_id, channel_id
+            FROM report_conversations
+            WHERE reporter_id = $1 AND is_open = TRUE
+            ORDER BY created_at DESC
+            LIMIT 1;
+            """,
+            int(reporter_id)
+        )
+        return dict(row) if row else None
+
+async def close_conversation(report_id: int) -> None:
+    pool = get_pool()
+    if pool is None:
+        raise RuntimeError("DB pool is not initialized.")
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE report_conversations SET is_open = FALSE WHERE report_id = $1;",
+            int(report_id)
+        )
