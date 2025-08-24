@@ -32,19 +32,6 @@ SURFACE_ERROR_CODE = os.getenv("LFG_SURFACE_ERROR_CODE", "1") == "1"
 
 AD_ID_RE = re.compile(r"Ad\s*#\s*(\d+)", re.IGNORECASE)
 
-# --- new tiny helper (no external deps) --------------------------------------
-def _is_msg_expired(msg: discord.Message | None, *, hours: int = 24) -> bool:
-    """Treat an LFG post as expired if its Discord message is older than `hours`."""
-    if not msg or not msg.created_at:
-        return False
-    try:
-        created = msg.created_at
-        # created_at is timezone-aware UTC
-        return created + timedelta(hours=hours) <= datetime.now(timezone.utc)
-    except Exception:
-        return False
-# -----------------------------------------------------------------------------
-
 async def safe_ack(
     interaction: discord.Interaction,
     *,
@@ -122,6 +109,16 @@ def _extract_ad_id_from_message(msg: discord.Message | None) -> int | None:
         pass
     return None
 
+# --- NEW: tiny helper for 24h expiry -----------------------------------------
+def _is_msg_expired(msg: discord.Message | None, *, hours: int = 24) -> bool:
+    if not msg or not msg.created_at:
+        return False
+    try:
+        return msg.created_at + timedelta(hours=hours) <= datetime.now(timezone.utc)
+    except Exception:
+        return False
+# -----------------------------------------------------------------------------
+
 class ConnectButton(ui.View):
     """Persistent actions for an LFG ad."""
     def __init__(self, ad_id: int | None = None, *, timeout: float | None = None):
@@ -159,7 +156,7 @@ class ConnectButton(ui.View):
             except Exception:
                 LOGGER.exception("Per-guild timeout check failed in ConnectButton.connect; allowing")
 
-            # --- NEW: 24h expiry gate based on the message timestamp -------------
+            # --- NEW: 24h expiry gate -------------------------------------------
             if _is_msg_expired(interaction.message, hours=24):
                 if acked and not sent_followup:
                     await interaction.followup.send(
@@ -185,7 +182,7 @@ class ConnectButton(ui.View):
             if pool is None:
                 raise RuntimeError("DB pool is not initialized; check DATABASE_URL and pool init in main().")
 
-            # --- CHANGED: do not close the ad; allow unlimited clicks -------------
+            # --- CHANGED: do NOT close the ad; allow unlimited clicks ------------
             async with pool.acquire() as conn:
                 ad = await conn.fetchrow(
                     """
@@ -507,8 +504,7 @@ class LfgAds(commands.Cog):
 
             # Success: at least one server posted
             await interaction.edit_original_response(
-                content=("✅ Your ad was posted!\n" f"• **Servers posted to:** {posted}\n"
-                        f"• It will accept connections for 24 hours.")
+                content=("✅ Your ad was posted!\n" f"• **Servers posted to:** {posted}")
             )
             await db.stats_inc("ads_posted", 1)
 
