@@ -16,10 +16,6 @@ import bot.db as db
 from ..ui.dm_styles import send_pretty_interest_dm
 from ..database import moderation_db, cooldowns_db
 
-# ---------------------
-# Logging
-# ---------------------
-
 LOGGER = logging.getLogger("lfg_ads")
 if not LOGGER.handlers:
     h = logging.StreamHandler()
@@ -28,19 +24,11 @@ if not LOGGER.handlers:
     LOGGER.addHandler(h)
 LOGGER.setLevel(logging.INFO)
 
-# ---------------------
-# Config
-# ---------------------
-
 POST_TIMEOUT_SECONDS = int(os.getenv("LFG_POST_TIMEOUT_SECONDS", "60"))
-USER_COOLDOWN_SEC = 5 * 60  # GLOBAL cooldown across servers
+USER_COOLDOWN_SEC = 5 * 60
 MAX_SEND_CONCURRENCY = int(os.getenv("LFG_POST_MAX_CONCURRENCY", "5"))
 PER_SEND_TIMEOUT = int(os.getenv("LFG_POST_PER_SEND_TIMEOUT", "8"))
 SURFACE_ERROR_CODE = os.getenv("LFG_SURFACE_ERROR_CODE", "1") == "1"
-
-# ---------------------
-# Utilities
-# ---------------------
 
 AD_ID_RE = re.compile(r"Ad\s*#\s*(\d+)", re.IGNORECASE)
 
@@ -72,13 +60,11 @@ async def safe_ack(
     except discord.HTTPException:
         return False
 
-
 def _err_code(prefix: str, exc: BaseException | None = None) -> str:
     if not SURFACE_ERROR_CODE:
         return ""
     typ = type(exc).__name__ if exc else ""
     return f" ({prefix}:{typ})" if typ else f" ({prefix})"
-
 
 def _check_channel_perms(guild: discord.Guild, channel: discord.abc.GuildChannel) -> list[str]:
     me = guild.me
@@ -94,7 +80,6 @@ def _check_channel_perms(guild: discord.Guild, channel: discord.abc.GuildChannel
         missing.append("embed_links")
     return missing
 
-
 def _rel(ts: datetime | None) -> str:
     if not ts:
         return ""
@@ -102,7 +87,6 @@ def _rel(ts: datetime | None) -> str:
         return f"<t:{int(ts.replace(tzinfo=timezone.utc).timestamp())}:R>"
     except Exception:
         return ts.isoformat()
-
 
 def _extract_ad_id_from_message(msg: discord.Message | None) -> int | None:
     if not msg:
@@ -125,18 +109,8 @@ def _extract_ad_id_from_message(msg: discord.Message | None) -> int | None:
         pass
     return None
 
-# ---------------------
-# Button View (Persistent)
-# ---------------------
-
 class ConnectButton(ui.View):
-    """
-    Persistent actions for an LFG ad.
-    - timeout=None => persistent across restarts
-    - custom_ids are stable ('lfg:connect', 'lfg:report') so one instance on boot
-      can handle ALL historical messages.
-    - ad_id is resolved from the embed if not present (post-restart case).
-    """
+    """Persistent actions for an LFG ad."""
     def __init__(self, ad_id: int | None = None, *, timeout: float | None = None):
         super().__init__(timeout=timeout)  # None = persistent
         self.ad_id = ad_id
@@ -146,21 +120,33 @@ class ConnectButton(ui.View):
         acked = await safe_ack(interaction, message=None, ephemeral=True, use_thinking=False)
         sent_followup = False
         try:
-            # Timeout gate for connectors
+            # GLOBAL timeout gate first
+            try:
+                if await moderation_db.is_user_globally_timed_out(interaction.user.id):
+                    until = await moderation_db.get_global_timeout_until(interaction.user.id)
+                    if acked:
+                        await interaction.followup.send(
+                            f"You’re timed out from using the bot{f' until {_rel(until)}' if until else ''}.",
+                            ephemeral=True,
+                        )
+                    return
+            except Exception:
+                LOGGER.exception("Global timeout check failed in ConnectButton.connect; allowing")
+
+            # Per-guild gate (kept for compatibility)
             try:
                 if interaction.guild and await moderation_db.is_user_timed_out(interaction.guild.id, interaction.user.id):
                     until = await moderation_db.get_timeout_until(interaction.guild.id, interaction.user.id)
                     if acked:
                         await interaction.followup.send(
-                            f"You’re timed out from using the bot. Try again {_rel(until)}." if until else
-                            "You’re timed out from using the bot.",
+                            f"You’re timed out from using the bot{f' until {_rel(until)}' if until else ''}.",
                             ephemeral=True,
                         )
                     return
             except Exception:
-                LOGGER.exception("Timeout check failed in ConnectButton.connect; allowing")
+                LOGGER.exception("Per-guild timeout check failed in ConnectButton.connect; allowing")
 
-            # Resolve ad_id (works pre- and post-restart)
+            # Resolve ad_id
             ad_id = self.ad_id or _extract_ad_id_from_message(interaction.message)
             if not ad_id:
                 if acked and not sent_followup:
@@ -258,7 +244,6 @@ class ConnectButton(ui.View):
 
     @ui.button(label="Report", style=discord.ButtonStyle.danger, custom_id="lfg:report")
     async def report(self, interaction: discord.Interaction, button: ui.Button):
-        """Open a modal to report this ad; routes to main bot guild Reports category."""
         try:
             pool = get_pool()
             if pool is None:
@@ -280,13 +265,11 @@ class ConnectButton(ui.View):
 
             reported_id = int(ad_row["author_id"])
 
-            # Reports cog should be loaded by main.py at startup
             reports_cog = interaction.client.get_cog("Reports")
             if not reports_cog or not hasattr(reports_cog, "open_report_modal"):
                 await interaction.response.send_message("Reporting isn’t available right now. Try again later.", ephemeral=True)
                 return
 
-            # First response must be the modal:
             await reports_cog.open_report_modal(interaction, reported_id=reported_id, ad_id=int(ad_id))
 
         except Exception:
@@ -296,19 +279,12 @@ class ConnectButton(ui.View):
             else:
                 await interaction.response.send_message("Something went wrong while opening the report form.", ephemeral=True)
 
-# ---------------------
-# Cog + Commands
-# ---------------------
-
 class LfgAds(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
     async def cog_load(self) -> None:
-        # Register persistent view for old messages
         self.bot.add_view(ConnectButton(ad_id=None, timeout=None))
-
-        # Ensure cooldowns table exists (no-op if already there)
         try:
             await cooldowns_db.ensure_cooldowns_schema()
         except Exception:
@@ -332,19 +308,31 @@ class LfgAds(commands.Cog):
         region: str | None = None,
         notes: str | None = None,
     ):
-        # ---- Timeout gate BEFORE cooldown/ack ----
+        # GLOBAL timeout gate first
+        try:
+            if await moderation_db.is_user_globally_timed_out(interaction.user.id):
+                until = await moderation_db.get_global_timeout_until(interaction.user.id)
+                await interaction.response.send_message(
+                    f"You’re currently timed out from using the bot{f' until {_rel(until)}' if until else ''}.",
+                    ephemeral=True,
+                )
+                return
+        except Exception:
+            LOGGER.exception("Global timeout check failed in /lfg_ad post; allowing command to proceed")
+
+        # Per-guild gate (optional, backward-compatible)
         try:
             if await moderation_db.is_user_timed_out(interaction.guild.id, interaction.user.id):
                 until = await moderation_db.get_timeout_until(interaction.guild.id, interaction.user.id)
-                msg = "You’re currently timed out from using this command."
-                if until:
-                    msg += f" Try again {_rel(until)}."
-                await interaction.response.send_message(msg, ephemeral=True)
+                await interaction.response.send_message(
+                    f"You’re currently timed out from using the bot{f' until {_rel(until)}' if until else ''}.",
+                    ephemeral=True,
+                )
                 return
         except Exception:
-            LOGGER.exception("Timeout check failed in /lfg_ad post; allowing command to proceed")
+            LOGGER.exception("Per-guild timeout check failed in /lfg_ad post; allowing command to proceed")
 
-        # ---- GLOBAL cooldown (DB) AFTER timeout gate ----
+        # GLOBAL cooldown (DB)
         now = datetime.now(timezone.utc)
         try:
             next_ok = await cooldowns_db.get_next_ok_at(interaction.user.id)
@@ -361,68 +349,58 @@ class LfgAds(commands.Cog):
         if not acked:
             return
 
-        async def do_post_work() -> int:
+        async def do_post_work() -> tuple[int, int | None]:
+            """
+            Returns (posted_count, ad_id_if_inserted)
+            """
             pool = get_pool()
             if pool is None:
                 raise RuntimeError("DB pool is not initialized; check DATABASE_URL and pool init in main().")
 
-            # 1) Insert the ad in the DB
-            try:
-                async with pool.acquire() as conn:
-                    ad_id = await conn.fetchval(
-                        """
-                        INSERT INTO lfg_ads (author_id, author_name, game, platform, region, notes, status)
-                        VALUES ($1, $2, $3, $4, $5, $6, 'open')
-                        RETURNING id
-                        """,
-                        int(interaction.user.id),
-                        str(interaction.user),
-                        game,
-                        platform,
-                        region,
-                        notes,
-                    )
-            except Exception as exc:
-                LOGGER.error("DB insert failed:\n%s", traceback.format_exc())
-                raise RuntimeError("DB_INSERT") from exc
-
-            # 2) Build the embed/view
-            try:
-                title_bits: list[str] = [game]
-                if platform:
-                    title_bits.append(f"• {platform}")
-                if region:
-                    title_bits.append(f"• {region}")
-
-                embed = discord.Embed(
-                    title=" ".join(title_bits),
-                    description=notes or "Looking for teammates!",
-                    color=discord.Color.blurple(),
+            # 0) Find all configured destinations FIRST
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT guild_id, lfg_channel_id FROM guild_settings WHERE lfg_channel_id IS NOT NULL"
                 )
-                embed.set_author(
-                    name=str(interaction.user),
-                    icon_url=interaction.user.display_avatar.url,
-                )
-                embed.set_footer(
-                    text=f"Posted by {interaction.user} • Ad #{ad_id} • Powered by Matchmaker",
-                    icon_url="https://i.imgur.com/4x9pIr0.png"
-                )
-                # PERSISTENT view; stores ad_id for fast path, but works post-restart via footer parsing
-                view = ConnectButton(ad_id=ad_id, timeout=None)
-            except Exception as exc:
-                LOGGER.error("Building embed failed:\n%s", traceback.format_exc())
-                raise RuntimeError("EMBED_BUILD") from exc
+            if not rows:
+                return (0, None)  # no insert, nothing to post
 
-            # 3) BROADCAST: fetch every guild's configured LFG channel and post concurrently
-            try:
-                async with pool.acquire() as conn:
-                    rows = await conn.fetch(
-                        "SELECT guild_id, lfg_channel_id FROM guild_settings WHERE lfg_channel_id IS NOT NULL"
-                    )
-            except Exception as exc:
-                LOGGER.error("Guild settings query failed:\n%s", traceback.format_exc())
-                raise RuntimeError("GUILD_QUERY") from exc
+            # 1) INSERT the ad now that we know there are destinations
+            async with pool.acquire() as conn:
+                ad_id = await conn.fetchval(
+                    """
+                    INSERT INTO lfg_ads (author_id, author_name, game, platform, region, notes, status)
+                    VALUES ($1, $2, $3, $4, $5, $6, 'open')
+                    RETURNING id
+                    """,
+                    int(interaction.user.id),
+                    str(interaction.user),
+                    game,
+                    platform,
+                    region,
+                    notes,
+                )
 
+            # 2) Build embed/view
+            title_bits: list[str] = [game]
+            if platform:
+                title_bits.append(f"• {platform}")
+            if region:
+                title_bits.append(f"• {region}")
+
+            embed = discord.Embed(
+                title=" ".join(title_bits),
+                description=notes or "Looking for teammates!",
+                color=discord.Color.blurple(),
+            )
+            embed.set_author(name=str(interaction.user), icon_url=interaction.user.display_avatar.url)
+            embed.set_footer(
+                text=f"Posted by {interaction.user} • Ad #{ad_id} • Powered by Matchmaker",
+                icon_url="https://i.imgur.com/4x9pIr0.png"
+            )
+            view = ConnectButton(ad_id=ad_id, timeout=None)
+
+            # 3) Try to send everywhere (best-effort)
             sem = asyncio.Semaphore(MAX_SEND_CONCURRENCY)
             posted_count = 0
 
@@ -433,35 +411,28 @@ class LfgAds(commands.Cog):
                 channel = guild.get_channel(channel_id)
                 if not isinstance(channel, discord.TextChannel):
                     return False
-
                 missing = _check_channel_perms(guild, channel)
                 if missing:
                     LOGGER.info("Skip %s#%s (missing perms: %s)", guild_id, channel_id, missing)
                     return False
-
                 async with sem:
                     try:
                         await asyncio.wait_for(channel.send(embed=embed, view=view), timeout=PER_SEND_TIMEOUT)
                         return True
-                    except (discord.Forbidden, discord.HTTPException, asyncio.TimeoutError) as exc:
-                        LOGGER.info("Send to %s#%s failed: %r", guild.name if guild else guild_id, channel_id, exc)
+                    except (discord.Forbidden, discord.HTTPException, asyncio.TimeoutError):
                         return False
 
-            tasks = [
-                asyncio.create_task(send_one(int(r["guild_id"]), int(r["lfg_channel_id"])))
-                for r in rows
-            ]
-
+            tasks = [asyncio.create_task(send_one(int(r["guild_id"]), int(r["lfg_channel_id"]))) for r in rows]
             for coro in asyncio.as_completed(tasks):
-                ok = await coro
-                if ok:
+                if await coro:
                     posted_count += 1
 
-            return posted_count
+            return (posted_count, int(ad_id))
 
         # Run and handle outcomes
+        ad_id_inserted: int | None = None
         try:
-            posted = await asyncio.wait_for(do_post_work(), timeout=POST_TIMEOUT_SECONDS)
+            posted, ad_id_inserted = await asyncio.wait_for(do_post_work(), timeout=POST_TIMEOUT_SECONDS)
         except asyncio.TimeoutError:
             LOGGER.warning("post() timed out after %ss", POST_TIMEOUT_SECONDS)
             try:
@@ -480,32 +451,48 @@ class LfgAds(commands.Cog):
                 pass
             return
 
+        # Present outcome + manage cooldown + cleanup if needed
         try:
+            if ad_id_inserted is None:
+                # We never inserted (no destinations configured)
+                await interaction.edit_original_response(
+                    content=("No LFG channels are configured anywhere yet.\n"
+                             "Ask a server admin to run `/lfg_channel set #channel`, then try again.")
+                )
+                return
+
             if posted == 0:
-                await interaction.edit_original_response(
-                    content=(
-                        "Your ad was saved, but no servers accepted the post. "
-                        "Check LFG channel permissions or set up channels with `/lfg_channel set #channel`."
-                    )
-                )
-            else:
-                await interaction.edit_original_response(
-                    content=(
-                        "✅ Your ad was posted!"
-                        f"\n• **Servers posted to:** {posted}"
-                    )
-                )
-                await db.stats_inc("ads_posted", 1)
-                # Set GLOBAL cooldown in DB
+                # Delete the inserted ad so nothing is "saved"
                 try:
-                    now2 = datetime.now(timezone.utc)
-                    await cooldowns_db.set_next_ok_at(
-                        interaction.user.id,
-                        now2 + timedelta(seconds=USER_COOLDOWN_SEC),
-                        reason="lfg_post",
-                    )
+                    pool = get_pool()
+                    async with pool.acquire() as conn:
+                        await conn.execute("DELETE FROM lfg_ads WHERE id = $1", int(ad_id_inserted))
                 except Exception:
-                    LOGGER.exception("Cooldown write failed")
+                    LOGGER.exception("Failed to delete ad %s after 0 posts", ad_id_inserted)
+
+                await interaction.edit_original_response(
+                    content=("No servers accepted the post (missing channel or permissions). "
+                             "Nothing was saved. Ask an admin to set `/lfg_channel set #channel` "
+                             "and ensure I can Send Messages & Embed Links.")
+                )
+                return
+
+            # Success: at least one server posted
+            await interaction.edit_original_response(
+                content=("✅ Your ad was posted!\n" f"• **Servers posted to:** {posted}")
+            )
+            await db.stats_inc("ads_posted", 1)
+
+            # Set GLOBAL cooldown in DB
+            try:
+                now2 = datetime.now(timezone.utc)
+                await cooldowns_db.set_next_ok_at(
+                    interaction.user.id,
+                    now2 + timedelta(seconds=USER_COOLDOWN_SEC),
+                    reason="lfg_post",
+                )
+            except Exception:
+                LOGGER.exception("Cooldown write failed")
         except (discord.NotFound, discord.HTTPException):
             pass
 
