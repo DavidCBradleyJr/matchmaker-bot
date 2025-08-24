@@ -119,6 +119,7 @@ def _is_msg_expired(msg: discord.Message | None, *, hours: int = 24) -> bool:
         return False
 # -----------------------------------------------------------------------------
 
+
 class ConnectButton(ui.View):
     """Persistent actions for an LFG ad."""
     def __init__(self, ad_id: int | None = None, *, timeout: float | None = None):
@@ -299,6 +300,7 @@ class ConnectButton(ui.View):
             else:
                 await interaction.response.send_message("Something went wrong while opening the report form.", ephemeral=True)
 
+
 class LfgAds(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -415,13 +417,15 @@ class LfgAds(commands.Cog):
             )
             embed.set_author(name=str(interaction.user), icon_url=interaction.user.display_avatar.url)
 
-            # --- NEW: show expiry hint in footer (24h from now) -------------------
+            # NEW: show expiry as a FIELD (Discord renders <t:...:R> here)
             expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
+            embed.add_field(name="Expires", value=_rel(expires_at), inline=True)
+
+            # Keep footer simple (footers don't render timestamps/markdown)
             embed.set_footer(
-                text=f"Posted by {interaction.user} • Ad #{ad_id} • Expires {_rel(expires_at)} • Powered by Matchmaker",
+                text=f"Posted by {interaction.user} • Ad #{ad_id} • Powered by Matchmaker",
                 icon_url="https://i.imgur.com/4x9pIr0.png"
             )
-            # ---------------------------------------------------------------------
 
             view = ConnectButton(ad_id=ad_id, timeout=None)
 
