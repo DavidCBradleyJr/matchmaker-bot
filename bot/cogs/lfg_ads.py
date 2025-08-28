@@ -13,7 +13,7 @@ from discord.ext import commands
 
 from ..db import get_pool
 import bot.db as db
-from ..ui.dm_styles import send_pretty_interest_dm, notify_poster_of_interest
+from ..ui.dm_styles import send_pretty_interest_dm
 from ..database import moderation_db, cooldowns_db
 
 LOGGER = logging.getLogger("lfg_ads")
