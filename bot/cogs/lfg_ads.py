@@ -375,7 +375,139 @@ class LfgAds(commands.Cog):
         region: str | None = None,
         notes: str | None = None,
     ):
-        pass
+        """
+        Flow:
+        - Send an immediate ephemeral "Posting your ad…" (visible, not a spinner)
+        - Within a timeout, insert ad + broadcast to configured guild channels (concurrent with a cap)
+        - Edit the original message to the final result (success or guidance)
+        """
+        # Send the initial message (so deploy interrupts don't leave a spinner)
+        acked = await safe_ack(interaction, message="Posting your ad…", ephemeral=True, use_thinking=False)
+        if not acked:
+            return
+
+        async def do_post_work() -> int:
+            """Insert the ad, broadcast it, and return the number of servers posted to."""
+            # --- DB INSERT + SETTINGS FETCH ---
+            pool = get_pool()
+            if pool is None:
+                raise RuntimeError("DB pool is not initialized; check DATABASE_URL and pool init in main().")
+
+            try:
+                async with pool.acquire() as conn:
+                    ad_id = await conn.fetchval(
+                        """
+                        INSERT INTO lfg_ads (author_id, author_name, game, platform, region, notes, status)
+                        VALUES ($1, $2, $3, $4, $5, $6, 'open') RETURNING id
+                        """,
+                        int(interaction.user.id),
+                        str(interaction.user),
+                        game,
+                        platform,
+                        region,
+                        notes,
+                    )
+            except Exception as exc:
+                LOGGER.error("DB insert failed:\n%s", traceback.format_exc())
+                raise RuntimeError("DB_INSERT") from exc
+
+            try:
+                title_bits: list[str] = [game]
+                if platform:
+                    title_bits.append(f"• {platform}")
+                if region:
+                    title_bits.append(f"• {region}")
+
+                embed = discord.Embed(
+                    title=" ".join(title_bits),
+                    description=notes or "Looking for teammates!",
+                    color=discord.Color.blurple(),
+                )
+                embed.set_author(
+                    name=str(interaction.user),
+                    icon_url=interaction.user.display_avatar.url,
+                )
+                embed.set_footer(text=f"Posted by {interaction.user} • Ad #{ad_id}")
+
+                async with pool.acquire() as conn:
+                    rows = await conn.fetch(
+                        "SELECT guild_id, lfg_channel_id FROM guild_settings WHERE lfg_channel_id IS NOT NULL"
+                    )
+            except Exception as exc:
+                LOGGER.error("Building embed or guild settings query failed:\n%s", traceback.format_exc())
+                raise RuntimeError("GUILD_QUERY") from exc
+
+            # --- BROADCAST (CONCURRENT WITH CAP) ---
+            view = ConnectButton(ad_id=ad_id)
+            sem = asyncio.Semaphore(MAX_SEND_CONCURRENCY)
+            posted_count = 0
+
+            async def send_one(guild_id: int, channel_id: int) -> bool:
+                guild = self.bot.get_guild(guild_id)
+                if not guild:
+                    return False
+                channel = guild.get_channel(channel_id)
+                if not isinstance(channel, discord.TextChannel):
+                    return False
+                async with sem:
+                    try:
+                        await asyncio.wait_for(channel.send(embed=embed, view=view), timeout=PER_SEND_TIMEOUT)
+                        return True
+                    except (discord.Forbidden, discord.HTTPException, asyncio.TimeoutError) as exc:
+                        LOGGER.info("Send to %s#%s failed: %r", guild.name if guild else guild_id, channel_id, exc)
+                        return False
+
+            tasks = [
+                asyncio.create_task(send_one(int(r["guild_id"]), int(r["lfg_channel_id"])))
+                for r in rows
+            ]
+
+            for coro in asyncio.as_completed(tasks):
+                ok = await coro
+                if ok:
+                    posted_count += 1
+
+            return posted_count
+
+        try:
+            posted = await asyncio.wait_for(do_post_work(), timeout=POST_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            LOGGER.warning("post() timed out after %ss", POST_TIMEOUT_SECONDS)
+            try:
+                await interaction.edit_original_response(
+                    content="⏳ Timed out while posting your ad. Please try again." + _err_code("TIMEOUT")
+                )
+            except Exception:
+                pass
+            return
+        except Exception as exc:
+            # Any error inside do_post_work gets logged there; we surface a short code here.
+            try:
+                await interaction.edit_original_response(
+                    content="Something went wrong while posting your ad. Please try again." + _err_code("POST", exc)
+                )
+            except Exception:
+                pass
+            return
+
+        # Build and send the final result (edit the original message)
+        try:
+            if posted == 0:
+                await interaction.edit_original_response(
+                    content=(
+                        "Your ad was saved, but no servers have an LFG channel configured yet.\n"
+                        "Ask server owners to run `/lfg_channel set #channel`."
+                    )
+                )
+            else:
+                await interaction.edit_original_response(
+                    content=(
+                        "✅ Your ad was posted!"
+                        f"\n• **Servers posted to:** {posted}"
+                    )
+                )
+        except (discord.NotFound, discord.HTTPException):
+            pass
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(LfgAds(bot), override=True)
