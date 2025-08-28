@@ -1,6 +1,6 @@
-# db.py
 from typing import Iterable
 import os
+import time
 import asyncpg
 
 _pool: asyncpg.Pool | None = None
@@ -158,6 +158,10 @@ async def stats_set_meta(key: str, value: str) -> None:
             key, value,
         )
 
+async def stats_mark_bot_started() -> None:
+    """Stamp the bot's start time (epoch seconds, as string) on boot."""
+    await stats_set_meta("bot_start_time", str(int(time.time())))
+
 async def stats_snapshot() -> dict:
     pool = _require_pool()
     async with pool.acquire() as conn:
@@ -180,9 +184,18 @@ async def stats_snapshot() -> dict:
                 "matches_made": 0,
                 "errors": 0,
                 "bot_start_time": "",
+                "uptime_seconds": 0,
             }
         d = dict(row)
         for k in ("servers", "ads_posted", "connections_made", "matches_made", "errors"):
             d[k] = int(d.get(k, 0) or 0)
         d["bot_start_time"] = str(d.get("bot_start_time", "") or "")
+
+        # Compute uptime in seconds (0 if unset or unparsable)
+        now_ts = int(time.time())
+        try:
+            start_ts = int(float(d["bot_start_time"])) if d["bot_start_time"] else 0
+        except Exception:
+            start_ts = 0
+        d["uptime_seconds"] = max(0, now_ts - start_ts) if start_ts else 0
         return d
