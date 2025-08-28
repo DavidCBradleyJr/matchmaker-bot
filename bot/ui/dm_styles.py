@@ -21,7 +21,8 @@ async def send_pretty_interest_dm(
     # Build description
     description = (
         "You clicked **I’m interested** on an LFG post.\n\n"
-        f"**Poster:** {poster.mention}\n"
+        # Use a profile link so it’s always clickable, regardless of AllowedMentions
+        f"**Poster:** [{poster.display_name}](https://discord.com/users/{poster.id})\n"
         f"**Server:** {guild.name if guild else 'Unknown'}"
     )
     if notes:
@@ -52,11 +53,14 @@ async def send_pretty_interest_dm(
     view = discord.ui.View()
     if message_jump:
         view.add_item(discord.ui.Button(label="Open the ad", url=message_jump, emoji="🔗"))
+    view.add_item(discord.ui.Button(label="Message poster", url=f"https://discord.com/users/{poster.id}", emoji="✉️"))
 
     opener = (
         f"Hey {poster.display_name}! Saw your LFG for {game}. "
         "I’m down to play. Region: ___ | Role: ___ | Mic: Yes/No | Available: ___"
     )
 
-    await recipient.send(embed=embed, view=view)
+    allowed = discord.AllowedMentions(users=True, roles=False, everyone=False)
+
+    await recipient.send(embed=embed, view=view, allowed_mentions=allowed)
     await recipient.send("Quick opener you can copy/paste:\n" f"> {opener}")
