@@ -30,6 +30,13 @@ export default function Stats() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
+  // NEW: ticking "clock" so uptime updates without reloading
+  const [nowSec, setNowSec] = useState<number>(() => Math.floor(Date.now() / 1000));
+  useEffect(() => {
+    const id = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 60_000);
+    return () => clearInterval(id);
+  }, []);
+
   useEffect(() => {
     (async () => {
       try {
@@ -74,11 +81,18 @@ export default function Stats() {
     );
   }
 
+  // Derived uptime from bot_start_time (fallback to API uptime_seconds)
+  const startEpoch = Number(data.bot_start_time ?? 0);
+  const derivedUptime =
+    Number.isFinite(startEpoch) && startEpoch > 0
+      ? Math.max(0, nowSec - Math.floor(startEpoch))
+      : Number(data.uptime_seconds || 0);
+
   const items = [
     { label: "Servers", value: fmt(data.servers) },
     { label: "Ads posted", value: fmt(data.ads_posted) },
     { label: "Connections", value: fmt(data.connections_made) },
-    { label: "Uptime", value: fmtUptime(Number(data.uptime_seconds || 0)) },
+    { label: "Uptime", value: fmtUptime(derivedUptime) },
   ];
 
   return (
