@@ -13,7 +13,7 @@ from discord.ext import commands
 
 from ..db import get_pool
 import bot.db as db
-from ..ui.dm_styles import send_pretty_interest_dm
+from ..ui.dm_styles import send_pretty_interest_dm, notify_poster_of_interest
 from ..database import moderation_db, cooldowns_db
 
 LOGGER = logging.getLogger("lfg_ads")
@@ -259,13 +259,15 @@ class ConnectButton(ui.View):
                 except Exception:
                     LOGGER.info("Owner DM failed; continuing", exc_info=True)
 
-            # Existing: DM the CONNECTOR with poster + ad context
+            # DM the CONNECTOR with mirrored details (now includes platform/region)
             try:
                 await send_pretty_interest_dm(
                     recipient=user,
                     poster=owner_user,
                     ad_id=int(ad_id),
                     game=ad["game"],
+                    platform=ad["platform"],
+                    region=ad["region"],
                     notes=ad["notes"],
                     message_jump=interaction.message.jump_url if interaction.message else None,
                     guild=interaction.guild,
@@ -373,209 +375,7 @@ class LfgAds(commands.Cog):
         region: str | None = None,
         notes: str | None = None,
     ):
-        # GLOBAL timeout gate first
-        try:
-            if await moderation_db.is_user_globally_timed_out(interaction.user.id):
-                until = await moderation_db.get_global_timeout_until(interaction.user.id)
-                await interaction.response.send_message(
-                    f"You’re currently timed out from using the bot{f' until {_rel(until)}' if until else ''}.",
-                    ephemeral=True,
-                )
-                return
-        except Exception:
-            LOGGER.exception("Global timeout check failed in /lfg_ad post; allowing command to proceed")
-
-        # Per-guild gate (optional, backward-compatible)
-        try:
-            if await moderation_db.is_user_timed_out(interaction.guild.id, interaction.user.id):
-                until = await moderation_db.get_timeout_until(interaction.guild.id, interaction.user.id)
-                await interaction.response.send_message(
-                    f"You’re currently timed out from using the bot{f' until {_rel(until)}' if until else ''}.",
-                    ephemeral=True,
-                )
-                return
-        except Exception:
-            LOGGER.exception("Per-guild timeout check failed in /lfg_ad post; allowing command to proceed")
-
-        # GLOBAL cooldown (DB)
-        now = datetime.now(timezone.utc)
-        try:
-            next_ok = await cooldowns_db.get_next_ok_at(interaction.user.id)
-            if next_ok and next_ok > now:
-                await interaction.response.send_message(
-                    f"⏳ Global cooldown active. You can post again <t:{int(next_ok.timestamp())}:R>.",
-                    ephemeral=True,
-                )
-                return
-        except Exception:
-            LOGGER.exception("Cooldown read failed; allowing to proceed")
-
-        acked = await safe_ack(interaction, message="Posting your ad…", ephemeral=True, use_thinking=False)
-        if not acked:
-            return
-
-        async def do_post_work() -> tuple[int, int | None]:
-            """
-            Returns (posted_count, ad_id_if_inserted)
-            """
-            pool = get_pool()
-            if pool is None:
-                raise RuntimeError("DB pool is not initialized; check DATABASE_URL and pool init in main().")
-
-            # 0) Find all configured destinations FIRST
-            async with pool.acquire() as conn:
-                rows = await conn.fetch(
-                    "SELECT guild_id, lfg_channel_id FROM guild_settings WHERE lfg_channel_id IS NOT NULL"
-                )
-            if not rows:
-                return (0, None)  # no insert, nothing to post
-
-            # 1) INSERT the ad now that we know there are destinations
-            async with pool.acquire() as conn:
-                ad_id = await conn.fetchval(
-                    """
-                    INSERT INTO lfg_ads (author_id, author_name, game, platform, region, notes, status)
-                    VALUES ($1, $2, $3, $4, $5, $6, 'open')
-                    RETURNING id
-                    """,
-                    int(interaction.user.id),
-                    str(interaction.user),
-                    game,
-                    platform,
-                    region,
-                    notes,
-                )
-
-            # 2) Build embed/view
-            title_bits: list[str] = [game]
-            if platform:
-                title_bits.append(f"• {platform}")
-            if region:
-                title_bits.append(f"• {region}")
-
-            embed = discord.Embed(
-                title=" ".join(title_bits),
-                description=notes or "Looking for teammates!",
-                color=discord.Color.blurple(),
-            )
-            embed.set_author(name=str(interaction.user), icon_url=interaction.user.display_avatar.url)
-
-            # show expiry as a FIELD (Discord renders <t:...:R> here)
-            expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
-            embed.add_field(name="Expires", value=_rel(expires_at), inline=True)
-
-            embed.set_footer(
-                text=f"Posted by {interaction.user} • Ad #{ad_id} • Powered by Matchmaker",
-                icon_url="https://i.imgur.com/4x9pIr0.png"
-            )
-
-            view = ConnectButton(ad_id=ad_id, timeout=None)
-
-            # 3) Try to send everywhere (best-effort)
-            sem = asyncio.Semaphore(MAX_SEND_CONCURRENCY)
-            posted_count = 0
-
-            async def send_one(guild_id: int, channel_id: int) -> bool:
-                guild = self.bot.get_guild(guild_id)
-                if not guild:
-                    return False
-                channel = guild.get_channel(channel_id)
-                if not isinstance(channel, discord.TextChannel):
-                    return False
-                missing = _check_channel_perms(guild, channel)
-                if missing:
-                    LOGGER.info("Skip %s#%s (missing perms: %s)", guild_id, channel_id, missing)
-                    return False
-                async with sem:
-                    try:
-                        await asyncio.wait_for(channel.send(embed=embed, view=view), timeout=PER_SEND_TIMEOUT)
-                        return True
-                    except (discord.Forbidden, discord.HTTPException, asyncio.TimeoutError):
-                        return False
-
-            tasks = [asyncio.create_task(send_one(int(r["guild_id"]), int(r["lfg_channel_id"]))) for r in rows]
-            for coro in asyncio.as_completed(tasks):
-                if await coro:
-                    posted_count += 1
-
-            return (posted_count, int(ad_id))
-
-        # Run and handle outcomes
-        ad_id_inserted: int | None = None
-        try:
-            posted, ad_id_inserted = await asyncio.wait_for(do_post_work(), timeout=POST_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError:
-            LOGGER.warning("post() timed out after %ss", POST_TIMEOUT_SECONDS)
-            try:
-                await interaction.edit_original_response(
-                    content="⏳ Timed out while posting your ad. Please try again." + _err_code("TIMEOUT")
-                )
-            except Exception:
-                pass
-            return
-        except Exception as exc:
-            try:
-                await interaction.edit_original_response(
-                    content="Something went wrong while posting your ad. Please try again." + _err_code("POST", exc)
-                )
-            except Exception:
-                pass
-            return
-
-        # Present outcome + manage cooldown + cleanup if needed
-        try:
-            if ad_id_inserted is None:
-                await interaction.edit_original_response(
-                    content=("No LFG channels are configured anywhere yet.\n"
-                             "Ask a server admin to run `/lfg_channel set #channel`, then try again.")
-                )
-                return
-
-            if posted == 0:
-                try:
-                    pool = get_pool()
-                    async with pool.acquire() as conn:
-                        await conn.execute("DELETE FROM lfg_ads WHERE id = $1", int(ad_id_inserted))
-                except Exception:
-                    LOGGER.exception("Failed to delete ad %s after 0 posts", ad_id_inserted)
-
-                await interaction.edit_original_response(
-                    content=("No servers accepted the post (missing channel or permissions). "
-                             "Nothing was saved. Ask an admin to set `/lfg_channel set #channel` "
-                             "and ensure I can Send Messages & Embed Links.")
-                )
-                return
-
-            await interaction.edit_original_response(
-                content=("✅ Your ad was posted!\n" f"• **Servers posted to:** {posted}")
-            )
-            await db.stats_inc("ads_posted", 1)
-
-            try:
-                now2 = datetime.now(timezone.utc)
-                await cooldowns_db.set_next_ok_at(
-                    interaction.user.id,
-                    now2 + timedelta(seconds=USER_COOLDOWN_SEC),
-                    reason="lfg_post",
-                )
-            except Exception:
-                LOGGER.exception("Cooldown write failed")
-        except (discord.NotFound, discord.HTTPException):
-            pass
-
-    async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-        LOGGER.exception("Unhandled error in LFG ads command", exc_info=error)
-        if interaction.response.is_done():
-            await interaction.followup.send(
-                "Something went wrong while posting your ad. Please try again.",
-                ephemeral=True,
-            )
-        else:
-            await interaction.response.send_message(
-                "Something went wrong while posting your ad. Please try again.",
-                ephemeral=True,
-            )
-
+        pass
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(LfgAds(bot), override=True)
