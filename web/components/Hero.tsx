@@ -36,7 +36,7 @@ export default function Hero() {
             >
               <a
                 href="/api/invite"
-                className="rounded-xl px-5 py-3 bg-indigo-500 hover:bg-indigo-400 transition font-medium"
+                className="rounded-xl px-5 py-3 bg-indigo-500 hover:bg-indigo-400 transition font-medium text-white"
               >
                 Add to Discord
               </a>

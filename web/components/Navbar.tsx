@@ -16,7 +16,7 @@ export default function Navbar() {
         <div className="flex items-center gap-3">
           <a
             href="/api/invite"
-            className="rounded-xl px-4 py-2 bg-indigo-500 hover:bg-indigo-400 transition text-sm font-medium"
+            className="rounded-xl px-4 py-2 bg-indigo-500 hover:bg-indigo-400 transition text-sm font-medium text-white"
           >
             Add to Discord
           </a>

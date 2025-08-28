@@ -109,6 +109,17 @@ def _extract_ad_id_from_message(msg: discord.Message | None) -> int | None:
         pass
     return None
 
+# --- NEW: tiny helper for 24h expiry -----------------------------------------
+def _is_msg_expired(msg: discord.Message | None, *, hours: int = 24) -> bool:
+    if not msg or not msg.created_at:
+        return False
+    try:
+        return msg.created_at + timedelta(hours=hours) <= datetime.now(timezone.utc)
+    except Exception:
+        return False
+# -----------------------------------------------------------------------------
+
+
 class ConnectButton(ui.View):
     """Persistent actions for an LFG ad."""
     def __init__(self, ad_id: int | None = None, *, timeout: float | None = None):
@@ -146,6 +157,17 @@ class ConnectButton(ui.View):
             except Exception:
                 LOGGER.exception("Per-guild timeout check failed in ConnectButton.connect; allowing")
 
+            # --- NEW: 24h expiry gate -------------------------------------------
+            if _is_msg_expired(interaction.message, hours=24):
+                if acked and not sent_followup:
+                    await interaction.followup.send(
+                        "This LFG post has expired. Try a newer one!",
+                        ephemeral=True,
+                    )
+                    sent_followup = True
+                return
+            # ---------------------------------------------------------------------
+
             # Resolve ad_id
             ad_id = self.ad_id or _extract_ad_id_from_message(interaction.message)
             if not ad_id:
@@ -161,24 +183,23 @@ class ConnectButton(ui.View):
             if pool is None:
                 raise RuntimeError("DB pool is not initialized; check DATABASE_URL and pool init in main().")
 
+            # --- CHANGED: do NOT close the ad; allow unlimited clicks ------------
             async with pool.acquire() as conn:
                 ad = await conn.fetchrow(
                     """
-                    UPDATE lfg_ads
-                    SET status = 'connected', connector_id = $1, connector_name = $2
-                    WHERE id = $3 AND status = 'open'
-                    RETURNING id, author_id, author_name, game, platform, region, notes
+                    SELECT id, author_id, author_name, game, platform, region, notes
+                    FROM lfg_ads
+                    WHERE id = $1
                     """,
-                    int(user.id),
-                    str(user),
                     int(ad_id),
                 )
                 await db.stats_inc("connections_made", 1)
+            # ---------------------------------------------------------------------
 
             if not ad:
                 if acked:
                     await interaction.followup.send(
-                        "Someone already connected with this ad. Try another one!",
+                        "This ad no longer exists.",
                         ephemeral=True,
                     )
                     sent_followup = True
@@ -278,6 +299,7 @@ class ConnectButton(ui.View):
                 await interaction.followup.send("Something went wrong while opening the report form.", ephemeral=True)
             else:
                 await interaction.response.send_message("Something went wrong while opening the report form.", ephemeral=True)
+
 
 class LfgAds(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -394,10 +416,17 @@ class LfgAds(commands.Cog):
                 color=discord.Color.blurple(),
             )
             embed.set_author(name=str(interaction.user), icon_url=interaction.user.display_avatar.url)
+
+            # NEW: show expiry as a FIELD (Discord renders <t:...:R> here)
+            expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
+            embed.add_field(name="Expires", value=_rel(expires_at), inline=True)
+
+            # Keep footer simple (footers don't render timestamps/markdown)
             embed.set_footer(
                 text=f"Posted by {interaction.user} • Ad #{ad_id} • Powered by Matchmaker",
                 icon_url="https://i.imgur.com/4x9pIr0.png"
             )
+
             view = ConnectButton(ad_id=ad_id, timeout=None)
 
             # 3) Try to send everywhere (best-effort)

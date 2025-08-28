@@ -27,7 +27,6 @@ async def send_pretty_interest_dm(
     if notes:
         description += f"\n\n**Notes:** {notes}"
 
-    # Add minimal link at the very bottom
     description += "\n\n[🔗 matchmaker-site.fly.dev](https://matchmaker-site.fly.dev/)"
 
     embed = discord.Embed(
@@ -52,6 +51,14 @@ async def send_pretty_interest_dm(
     view = discord.ui.View()
     if message_jump:
         view.add_item(discord.ui.Button(label="Open the ad", url=message_jump, emoji="🔗"))
+
+    view.add_item(
+        discord.ui.Button(
+            label="Message poster",
+            url=f"discord://-/users/{poster.id}",
+            emoji="✉️"
+        )
+    )
 
     opener = (
         f"Hey {poster.display_name}! Saw your LFG for {game}. "
