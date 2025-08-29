@@ -31,6 +31,7 @@ class Bot(commands.Bot):
         await self.load_extension("bot.cogs.lfg_ads")
         await self.load_extension("bot.cogs.reports")
         await self.load_extension("bot.cogs.guild_events")
+        await self.load_extension("bot.cogs.privacy")
 
         # Register slash commands globally
         await self.tree.sync()
