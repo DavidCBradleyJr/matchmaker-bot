@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
-
 import asyncpg
+
 from ..db import get_pool
 
 log = logging.getLogger(__name__)
@@ -68,40 +67,81 @@ async def _safe_delete(conn: asyncpg.Connection, table: str, where_sql: str, *pa
         log.exception("Privacy delete failed for table=%s where=%s params=%s", table, where_sql, params)
 
 
-async def _delete_by_first_existing_column(conn, table: str, candidate_cols: list[str], user_id: int) -> None:
+async def _find_owner_like_column(conn: asyncpg.Connection, table: str) -> str | None:
     """
-    For tables with historical column name drift (e.g., lfg_ads.owner_id vs poster_id),
-    find the first column that exists and delete by it.
+    Inspect columns and choose the best candidate for 'ad owner' identity.
+    Handles legacy drift (owner_id/poster_id/author_id/creator_id/user_id, etc).
     """
     try:
-        if not await _table_exists(conn, table):
-            return
-        for col in candidate_cols:
-            if await _column_exists(conn, table, col):
-                await conn.execute(f"DELETE FROM public.{table} WHERE {col} = $1", int(user_id))
-                return
-        # If none of the columns exist, do nothing (schema mismatch)
-        log.warning("No matching column for delete on %s; tried %s", table, candidate_cols)
+        cols = await conn.fetch(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema='public' AND table_name=$1
+            """,
+            table,
+        )
+        names = {r["column_name"] for r in cols}
     except Exception:
-        log.exception("Column-aware delete failed for table=%s candidates=%s", table, candidate_cols)
+        log.exception("Failed columns introspection for %s", table)
+        return None
+
+    preferred = ["owner_id", "poster_id", "author_id", "creator_id", "user_id"]
+    for c in preferred:
+        if c in names:
+            return c
+
+    heuristics = [n for n in names if any(k in n for k in ("owner", "poster", "author", "creator")) or n.endswith("_user_id")]
+    heuristics = [n for n in heuristics if n not in {"ad_id", "guild_id", "channel_id", "message_id", "click_count"}]
+    return heuristics[0] if heuristics else None
+
+
+async def _delete_lfg_ads_for_user(conn: asyncpg.Connection, user_id: int) -> None:
+    """
+    Delete ads authored by the user, using column introspection.
+    If no owner-like column exists, fallback to deleting ads whose ad_id appears in the user's clicks.
+    """
+    if not await _table_exists(conn, "lfg_ads"):
+        return
+
+    col = await _find_owner_like_column(conn, "lfg_ads")
+    if col and await _column_exists(conn, "lfg_ads", col):
+        try:
+            await conn.execute(f"DELETE FROM public.lfg_ads WHERE {col} = $1", int(user_id))
+            return
+        except Exception:
+            log.exception("Delete by owner-like column failed for lfg_ads.%s", col)
+
+    # Fallback: delete ads where this user clicked (covers self-clicked ads; conservative)
+    if await _table_exists(conn, "lfg_ad_clicks"):
+        try:
+            await conn.execute(
+                "DELETE FROM public.lfg_ads WHERE ad_id IN (SELECT ad_id FROM public.lfg_ad_clicks WHERE user_id = $1)",
+                int(user_id)
+            )
+        except Exception:
+            log.exception("Fallback delete via lfg_ad_clicks failed for user_id=%s", user_id)
+    else:
+        log.warning("No matching column for delete on lfg_ads; tried owner-like columns and no lfg_ad_clicks table present.")
 
 
 async def delete_user_data(user_id: int) -> None:
     """
     Delete data the bot stores *about this user* across known tables.
 
-    - lfg_ads (owner_id|poster_id|user_id): removes the user's ads; clicks cascade via FK
-    - lfg_ad_clicks (user_id): removes their clicks on others' ads
-    - reports (reporter_id / reported_id): removes their reports and reports about them
-    - user_timeouts (user_id / created_by): removes timeouts on them and ones they created
-    - user_post_cooldowns (user_id): removes their ad post cooldown state
+    - lfg_ads: delete authored ads (introspection for owner column). If unknown, fallback via clicks.
+    - lfg_ad_clicks: delete their clicks on others' ads
+    - reports: delete as reporter and as reported
+    - user_timeouts: delete both as target and as creator (global)
+    - user_post_cooldowns: delete their ad post cooldown state
 
-    Each delete is isolated so one failure doesn't abort the rest.
+    Each delete step is isolated so one failure doesn't abort the rest.
     """
     pool = await _get_pool()
     async with pool.acquire() as conn:
-        # LFG: your ads (cascades clicks via FK); support legacy column names
-        await _delete_by_first_existing_column(conn, "lfg_ads", ["owner_id", "poster_id", "user_id"], int(user_id))
+        # LFG: delete your ads (owner-column aware) first — clicks cascade if FK exists
+        await _delete_lfg_ads_for_user(conn, int(user_id))
+
         # Your clicks on others' ads
         await _safe_delete(conn, "lfg_ad_clicks", "user_id = $1", int(user_id))
 
