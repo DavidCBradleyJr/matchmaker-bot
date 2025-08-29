@@ -11,9 +11,6 @@ log = logging.getLogger(__name__)
 
 
 async def _get_pool() -> asyncpg.Pool:
-    """
-    Mirrors your modules that tolerate get_pool being sync or async.
-    """
     pool = get_pool()
     if asyncio.iscoroutine(pool):
         pool = await pool
@@ -23,15 +20,38 @@ async def _get_pool() -> asyncpg.Pool:
 
 
 async def _table_exists(conn: asyncpg.Connection, table: str) -> bool:
-    """
-    Return True if public.{table} exists.
-    """
+    """Return True if public.{table} exists."""
     fqn = f"public.{table}"
     try:
         exists = await conn.fetchval("SELECT to_regclass($1)", fqn)
         return bool(exists)
     except Exception:
         log.exception("Failed table existence check for %s", fqn)
+        return False
+
+
+async def _column_exists(conn: asyncpg.Connection, table: str, column: str) -> bool:
+    """Return True if column exists on public.{table}."""
+    try:
+        return bool(
+            await conn.fetchval(
+                """
+                SELECT 1
+                FROM   pg_attribute a
+                JOIN   pg_class c ON a.attrelid = c.oid
+                JOIN   pg_namespace n ON c.relnamespace = n.oid
+                WHERE  n.nspname = 'public'
+                  AND  c.relname = $1
+                  AND  a.attname = $2
+                  AND  a.attnum > 0
+                  AND  NOT a.attisdropped
+                LIMIT 1
+                """,
+                table, column
+            )
+        )
+    except Exception:
+        log.exception("Failed column existence check for %s.%s", table, column)
         return False
 
 
@@ -48,22 +68,40 @@ async def _safe_delete(conn: asyncpg.Connection, table: str, where_sql: str, *pa
         log.exception("Privacy delete failed for table=%s where=%s params=%s", table, where_sql, params)
 
 
+async def _delete_by_first_existing_column(conn, table: str, candidate_cols: list[str], user_id: int) -> None:
+    """
+    For tables with historical column name drift (e.g., lfg_ads.owner_id vs poster_id),
+    find the first column that exists and delete by it.
+    """
+    try:
+        if not await _table_exists(conn, table):
+            return
+        for col in candidate_cols:
+            if await _column_exists(conn, table, col):
+                await conn.execute(f"DELETE FROM public.{table} WHERE {col} = $1", int(user_id))
+                return
+        # If none of the columns exist, do nothing (schema mismatch)
+        log.warning("No matching column for delete on %s; tried %s", table, candidate_cols)
+    except Exception:
+        log.exception("Column-aware delete failed for table=%s candidates=%s", table, candidate_cols)
+
+
 async def delete_user_data(user_id: int) -> None:
     """
     Delete data the bot stores *about this user* across known tables.
 
-    - lfg_ads (owner): removes the user's ads; clicks cascade via FK (see lfg_ads_db schema)
+    - lfg_ads (owner_id|poster_id|user_id): removes the user's ads; clicks cascade via FK
     - lfg_ad_clicks (user_id): removes their clicks on others' ads
     - reports (reporter_id / reported_id): removes their reports and reports about them
     - user_timeouts (user_id / created_by): removes timeouts on them and ones they created
     - user_post_cooldowns (user_id): removes their ad post cooldown state
 
-    All steps are best-effort and resilient to missing tables.
+    Each delete is isolated so one failure doesn't abort the rest.
     """
     pool = await _get_pool()
-    async with pool.acquire() as conn, conn.transaction():
-        # LFG: your ads (owner) — cascades to lfg_ad_clicks via FK
-        await _safe_delete(conn, "lfg_ads", "owner_id = $1", int(user_id))
+    async with pool.acquire() as conn:
+        # LFG: your ads (cascades clicks via FK); support legacy column names
+        await _delete_by_first_existing_column(conn, "lfg_ads", ["owner_id", "poster_id", "user_id"], int(user_id))
         # Your clicks on others' ads
         await _safe_delete(conn, "lfg_ad_clicks", "user_id = $1", int(user_id))
 
