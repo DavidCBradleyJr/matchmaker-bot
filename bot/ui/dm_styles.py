@@ -11,6 +11,8 @@ async def send_pretty_interest_dm(
     poster: discord.User | discord.Member,
     ad_id: int,
     game: str,
+    platform: Optional[str],
+    region: Optional[str],
     notes: Optional[str],
     message_jump: Optional[str],
     guild: Optional[discord.Guild],
@@ -18,20 +20,27 @@ async def send_pretty_interest_dm(
     color_seed = (sum(ord(c) for c in (game or "")) % 255)
     color = discord.Color.from_rgb(80, 120 + color_seed // 2, 255 - color_seed)
 
-    # Build description
-    description = (
-        "You clicked **I’m interested** on an LFG post.\n\n"
-        f"**Poster:** {poster.mention}\n"
-        f"**Server:** {guild.name if guild else 'Unknown'}"
-    )
+    lines = [
+        "You clicked **I’m interested** on an LFG post.",
+        "",
+        f"**Poster:** {poster.mention}",
+        f"**Server:** {guild.name if guild else 'Unknown'}",
+        "",
+        f"**Game:** `{game}`",
+    ]
+    if platform:
+        lines.append(f"**Platform:** `{platform}`")
+    if region:
+        lines.append(f"**Region:** `{region}`")
     if notes:
-        description += f"\n\n**Notes:** {notes}"
+        lines.extend(["", f"**Notes:** {notes}"])
 
-    description += "\n\n[🔗 matchmaker-site.fly.dev](https://matchmaker-site.fly.dev/)"
+    # Optional site link
+    lines.append("\n[🔗 matchmaker-site.fly.dev](https://matchmaker-site.fly.dev/)")
 
     embed = discord.Embed(
         title="You’re connected! 🎮",
-        description=description,
+        description="\n".join(lines),
         color=color,
         timestamp=datetime.datetime.utcnow(),
     )
@@ -40,8 +49,6 @@ async def send_pretty_interest_dm(
     if avatar:
         embed.set_author(name=str(poster), icon_url=avatar)
         embed.set_thumbnail(url=avatar)
-
-    embed.add_field(name="Game", value=f"`{game}`", inline=True)
 
     embed.set_footer(
         text=f"Ad #{ad_id} • Powered by Matchmaker",
